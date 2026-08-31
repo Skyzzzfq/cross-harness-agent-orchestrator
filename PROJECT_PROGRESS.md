@@ -89,7 +89,13 @@
    - **2 CodeBuddy + 1 Codex 并行验证通过**（`stage2-mixed`）：workers_overlapped=true，真实时间重叠。
    - 真实验证期间 CodeBuddy 曾命中 5 小时用量配额（429，21:35 重置，厂商用量限制），配额恢复后补验即通过，代码路径无需改动。
 
-当前验证：121 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
+8. 写范围串行化、Merge Queue、Outbox 与 Git 恢复（S2-08，核心持久化已完成）
+   - schema v10：`merge_queue`（PENDING/APPLYING/APPLIED/CONFLICT/FAILED）、`outbox`（PENDING/SENT/FAILED）、`integration_issues`（write_scope_overlap/content_conflict/unexpected）。
+   - `claim_ready_dispatch` 事务内检测同 run ACTIVE 写任务的 `write_scope` 重叠，重叠任务不派发（派发前串行化）；不重叠并行。
+   - `enqueue_merge`/`claim_merge_queue` 原子领取（串行）、`finish_merge` APPLIED → task COMPLETED、CONFLICT → IntegrationIssue；`record_outbox_intent`/`claim_outbox`/`finish_outbox` Transactional Outbox；`reconcile_merge_queue` 已 APPLIED 绝不重放。
+   - 剩余（Git 层完整集成与安全校验）：commit trailer 对账、脏 checkout/磁盘不足/文件占用/半创建 worktree 安全拒绝。
+
+当前验证：128 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
 ## 3. 阶段 2 尚未完成：WorkBuddy 应按此顺序继续
 
@@ -118,12 +124,14 @@
 
 ### S2-08：写范围、Merge Queue、Outbox 与 Git 恢复
 
-- [ ] 已声明重叠 `write_scope` 在派发前串行化。
-- [ ] 未声明重叠或内容冲突进入明确 `IntegrationIssue`。
-- [ ] 持久串行 Merge Queue；只有审核通过的不可变 result commit 可以入队。
-- [ ] Transactional Outbox 负责数据库提交后的外部副作用。
-- [ ] 进程重启后通过 commit trailer/result commit 对账，证明不重复 merge。
-- [ ] 脏 checkout、磁盘不足、文件占用和半创建 worktree 均安全拒绝或回滚。
+- [x] 已声明重叠 `write_scope` 在派发前串行化（`claim_ready_dispatch` 事务内检测同 run ACTIVE 写任务重叠，冲突任务跳过）。
+- [x] 未声明重叠或内容冲突进入明确 `IntegrationIssue`（`integration_issues` 表，kind 含 `content_conflict`/`write_scope_overlap`/`unexpected`）。
+- [x] 持久串行 Merge Queue；只有审核通过的不可变 result commit 可以入队（schema v10 `merge_queue`，`enqueue_merge`/`claim_merge_queue` 原子领取，`finish_merge` APPLIED → task COMPLETED、CONFLICT → 记 issue）。
+- [x] Transactional Outbox 负责数据库提交后的外部副作用（schema v10 `outbox`，`record_outbox_intent`/`claim_outbox`/`finish_outbox`）。
+- [~] 进程重启后通过 commit trailer/result commit 对账，证明不重复 merge（`reconcile_merge_queue` 基础版：已 APPLIED 绝不重放、遗留 APPLYING 保守重置；Git 层 commit trailer 完整对账待后续增量）。
+- [ ] 脏 checkout、磁盘不足、文件占用和半创建 worktree 均安全拒绝或回滚（Git 层校验待接入统一 scheduler）。
+
+当前已通过 128 项测试（新增 7 项：write_scope 重叠串行化/不重叠并行、merge 入队原子领取、merge 成功完成 task+outbox、冲突记 issue、对账不重复、outbox 投递流）。
 
 ### S2-09：审核、人工审批、预算和业务 Supervisor Handoff
 

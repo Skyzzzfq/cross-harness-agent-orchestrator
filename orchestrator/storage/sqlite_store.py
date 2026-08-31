@@ -845,7 +845,7 @@ class SQLiteStateStore:
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self._ensure_controller_tx(controller, now_value)
-            row = self.connection.execute(
+            candidates = self.connection.execute(
                 """
                 SELECT t.task_id, t.run_id, t.access_mode, t.write_scope_json,
                        t.max_attempts, d.required_role_id, d.instruction_text,
@@ -874,10 +874,22 @@ class SQLiteStateStore:
                   AND d.paused = 0
                 ORDER BY d.priority DESC, t.created_at, t.task_id,
                          a.created_at, a.agent_id
-                LIMIT 1
                 """,
                 (run_id, now_value),
-            ).fetchone()
+            ).fetchall()
+            row = None
+            for candidate in candidates:
+                if candidate["access_mode"] == "write":
+                    scope = tuple(json.loads(candidate["write_scope_json"]))
+                    if scope and self._write_scope_conflicts(
+                        run_id,
+                        candidate["task_id"],
+                        scope,
+                        now_value,
+                    ):
+                        continue
+                row = candidate
+                break
             if row is None:
                 self.connection.commit()
                 return None
@@ -1447,6 +1459,399 @@ class SQLiteStateStore:
             "SELECT state FROM backend_calls WHERE call_id = ?", (call_id,)
         ).fetchone()
         return row is not None and row["state"] == "cancel_requested"
+
+    def _write_scope_conflicts(
+        self,
+        run_id: str,
+        task_id: str,
+        scope: tuple[str, ...],
+        now_value: str,
+    ) -> bool:
+        if not scope:
+            return False
+        rows = self.connection.execute(
+            """
+            SELECT write_scope_json FROM tasks
+            WHERE run_id = ? AND state = 'ACTIVE'
+              AND access_mode = 'write' AND task_id != ?
+            """,
+            (run_id, task_id),
+        ).fetchall()
+        target = set(scope)
+        for row in rows:
+            other = set(json.loads(row["write_scope_json"]))
+            if other & target:
+                return True
+        return False
+
+    def enqueue_merge(
+        self,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        result_commit: str,
+        base_commit: str,
+        controller: ControllerToken,
+        *,
+        reason: str,
+    ) -> str:
+        if not result_commit.strip() or not base_commit.strip():
+            raise ValueError("result_commit and base_commit must not be empty")
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            merge_id = f"merge-{uuid.uuid4().hex[:16]}"
+            idempotency_key = f"{run_id}:{task_id}:{attempt_id}"
+            self.connection.execute(
+                """
+                INSERT INTO merge_queue(
+                    merge_id, run_id, task_id, attempt_id, result_commit,
+                    base_commit, status, idempotency_key, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (
+                    merge_id,
+                    run_id,
+                    task_id,
+                    attempt_id,
+                    result_commit,
+                    base_commit,
+                    idempotency_key,
+                    now,
+                ),
+            )
+            self._append_event(
+                run_id,
+                task_id,
+                attempt_id,
+                "merge.enqueued",
+                "PENDING",
+                "PENDING",
+                {
+                    "reason": reason,
+                    "merge_id": merge_id,
+                    "result_commit": result_commit,
+                    "base_commit": base_commit,
+                },
+            )
+            self.connection.commit()
+            return merge_id
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def claim_merge_queue(
+        self, run_id: str, controller: ControllerToken
+    ) -> dict[str, Any] | None:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            row = self.connection.execute(
+                """
+                SELECT merge_id, task_id, attempt_id, result_commit, base_commit
+                FROM merge_queue
+                WHERE run_id = ? AND status = 'PENDING'
+                ORDER BY created_at, merge_id
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            self.connection.execute(
+                """
+                UPDATE merge_queue
+                SET status = 'APPLYING', claim_owner = ?, claimed_at = ?
+                WHERE merge_id = ? AND status = 'PENDING'
+                """,
+                (controller.owner_id, now, row["merge_id"]),
+            )
+            self._append_event(
+                run_id,
+                row["task_id"],
+                row["attempt_id"],
+                "merge.claimed",
+                "PENDING",
+                "APPLYING",
+                {"merge_id": row["merge_id"]},
+            )
+            self.connection.commit()
+            return {
+                "merge_id": row["merge_id"],
+                "task_id": row["task_id"],
+                "attempt_id": row["attempt_id"],
+                "result_commit": row["result_commit"],
+                "base_commit": row["base_commit"],
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def finish_merge(
+        self,
+        merge_id: str,
+        status: str,
+        controller: ControllerToken,
+        *,
+        result_commit: str | None = None,
+        issue_kind: str | None = None,
+        issue_detail: dict[str, Any] | None = None,
+    ) -> None:
+        if status not in {"applied", "conflict", "failed"}:
+            raise ValueError(f"unsupported merge status: {status}")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                """
+                SELECT m.run_id, m.task_id, m.attempt_id, m.status, m.claim_owner,
+                       t.state AS task_state
+                FROM merge_queue m JOIN tasks t ON t.task_id = m.task_id
+                WHERE m.merge_id = ?
+                """,
+                (merge_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(merge_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            if row["claim_owner"] != controller.owner_id:
+                raise FencedControllerError(
+                    "merge was claimed by a different controller owner"
+                )
+            run_id = str(row["run_id"])
+            task_id = str(row["task_id"])
+            attempt_id = str(row["attempt_id"])
+            target = {
+                "applied": "APPLIED",
+                "conflict": "CONFLICT",
+                "failed": "FAILED",
+            }[status]
+            self.connection.execute(
+                """
+                UPDATE merge_queue
+                SET status = ?, settled_at = ?
+                WHERE merge_id = ? AND claim_owner = ?
+                """,
+                (target, now, merge_id, controller.owner_id),
+            )
+            if status == "applied":
+                if row["task_state"] == TaskState.REVIEW.value:
+                    self._transition_task_tx(
+                        task_id, TaskState.INTEGRATION, "merge-applied", now
+                    )
+                    self._transition_task_tx(
+                        task_id, TaskState.COMPLETED, "merge-applied", now
+                    )
+                elif row["task_state"] == TaskState.INTEGRATION.value:
+                    self._transition_task_tx(
+                        task_id, TaskState.COMPLETED, "merge-applied", now
+                    )
+            elif issue_kind:
+                issue_id = f"issue-{uuid.uuid4().hex[:16]}"
+                self.connection.execute(
+                    """
+                    INSERT INTO integration_issues(
+                        issue_id, run_id, task_id, attempt_id, kind, detail_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        issue_id,
+                        run_id,
+                        task_id,
+                        attempt_id,
+                        issue_kind,
+                        json.dumps(issue_detail or {}),
+                        now,
+                    ),
+                )
+                self._append_event(
+                    run_id,
+                    task_id,
+                    attempt_id,
+                    "integration.issue",
+                    row["status"],
+                    target,
+                    {"merge_id": merge_id, "kind": issue_kind, "detail": issue_detail or {}},
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def reconcile_merge_queue(
+        self, run_id: str, controller: ControllerToken
+    ) -> dict[str, Any]:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            # 重启后遗留的 APPLYING 且非当前 owner 的记录：没有可对账的
+            # commit trailer 时保守重置回 PENDING（可安全重试一次，重复由
+            # idempotency_key 与 commit 对账兜底）；已 APPLIED 绝不重放。
+            rows = self.connection.execute(
+                """
+                SELECT merge_id, task_id, attempt_id FROM merge_queue
+                WHERE run_id = ? AND status = 'APPLYING'
+                  AND claim_owner != ?
+                """,
+                (run_id, controller.owner_id),
+            ).fetchall()
+            requeued: list[str] = []
+            for row in rows:
+                self.connection.execute(
+                    """
+                    UPDATE merge_queue
+                    SET status = 'PENDING', claim_owner = NULL, claimed_at = NULL
+                    WHERE merge_id = ? AND status = 'APPLYING' AND claim_owner != ?
+                    """,
+                    (row["merge_id"], controller.owner_id),
+                )
+                requeued.append(str(row["merge_id"]))
+            self.connection.commit()
+            return {"requeued": requeued, "reapplied": []}
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def record_outbox_intent(
+        self,
+        run_id: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        controller: ControllerToken,
+    ) -> str:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            outbox_id = f"outbox-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO outbox(
+                    outbox_id, run_id, aggregate_type, aggregate_id, event_type,
+                    payload_json, status, available_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (
+                    outbox_id,
+                    run_id,
+                    aggregate_type,
+                    aggregate_id,
+                    event_type,
+                    json.dumps(payload),
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                run_id,
+                aggregate_id,
+                None,
+                "outbox.recorded",
+                "PENDING",
+                "PENDING",
+                {"outbox_id": outbox_id, "event_type": event_type},
+            )
+            self.connection.commit()
+            return outbox_id
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def claim_outbox(
+        self, run_id: str, controller: ControllerToken
+    ) -> dict[str, Any] | None:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            row = self.connection.execute(
+                """
+                SELECT outbox_id, event_type, payload_json, attempts
+                FROM outbox
+                WHERE run_id = ? AND status = 'PENDING' AND available_at <= ?
+                ORDER BY created_at, outbox_id
+                LIMIT 1
+                """,
+                (run_id, now),
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            self.connection.execute(
+                """
+                UPDATE outbox SET attempts = attempts + 1 WHERE outbox_id = ?
+                """,
+                (row["outbox_id"],),
+            )
+            self.connection.commit()
+            return {
+                "outbox_id": row["outbox_id"],
+                "event_type": row["event_type"],
+                "payload": json.loads(row["payload_json"]),
+                "attempts": int(row["attempts"]) + 1,
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def finish_outbox(
+        self, outbox_id: str, status: str, controller: ControllerToken
+    ) -> None:
+        if status not in {"sent", "failed"}:
+            raise ValueError(f"unsupported outbox status: {status}")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                "SELECT run_id FROM outbox WHERE outbox_id = ?", (outbox_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(outbox_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            target = "SENT" if status == "sent" else "FAILED"
+            self.connection.execute(
+                """
+                UPDATE outbox
+                SET status = ?, sent_at = ?
+                WHERE outbox_id = ? AND status = 'PENDING'
+                """,
+                (target, now, outbox_id),
+            )
+            self._append_event(
+                row["run_id"],
+                outbox_id,
+                None,
+                "outbox.delivered" if target == "SENT" else "outbox.failed",
+                "PENDING",
+                target,
+                {"outbox_id": outbox_id},
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def mark_backend_call_running(
         self,
@@ -3459,7 +3864,7 @@ class SQLiteStateStore:
 
     def _migrate_schema(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 9:
+        if version > 10:
             raise RuntimeError(f"database schema version {version} is newer than supported")
         if version < 2:
             with self.connection:
@@ -3522,6 +3927,8 @@ class SQLiteStateStore:
             self._migrate_to_v8()
         if version < 9:
             self._migrate_to_v9()
+        if version < 10:
+            self._migrate_to_v10()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -3860,6 +4267,57 @@ class SQLiteStateStore:
                     "INTEGER NOT NULL DEFAULT 0"
                 )
             self.connection.execute("PRAGMA user_version=9")
+
+    def _migrate_to_v10(self) -> None:
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS merge_queue (
+                    merge_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL,
+                    result_commit TEXT NOT NULL,
+                    base_commit TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'PENDING', 'APPLYING', 'APPLIED', 'CONFLICT', 'FAILED'
+                    )),
+                    claim_owner TEXT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    claimed_at TEXT,
+                    settled_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS outbox (
+                    outbox_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'PENDING', 'SENT', 'FAILED'
+                    )),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    available_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS integration_issues (
+                    issue_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT,
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'write_scope_overlap', 'content_conflict', 'unexpected'
+                    )),
+                    detail_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT
+                );
+                PRAGMA user_version=10;
+                """
+            )
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(
