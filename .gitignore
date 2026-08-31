@@ -1,5 +1,6 @@
 .agent-hub/
 .venv/
+.workbuddy/
 __pycache__/
 *.py[cod]
 *.egg-info/

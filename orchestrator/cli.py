@@ -14,6 +14,7 @@ from orchestrator.poc.fake_demo import run_fake_demo
 from orchestrator.poc.git_demo import run_git_demo
 from orchestrator.poc.recovery_demo import run_recovery_demo
 from orchestrator.poc.real_demo import run_real_demo
+from orchestrator.poc.stage2_real import run_stage2_real
 from orchestrator.reconciler import run_reconciler_once
 from orchestrator.serve import serve
 from orchestrator.adapters.codebuddy_spike import run_codebuddy_session_spike
@@ -97,6 +98,20 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument("--reason", default="manual-cancel")
     cancel.add_argument(
         "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    stage2_real = subcommands.add_parser(
+        "stage2-real",
+        help="run frozen real Codex/CodeBuddy scenarios through the unified scheduler",
+    )
+    stage2_real.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    stage2_real.add_argument("--run", dest="run_id")
+    stage2_real.add_argument("--max-ticks", type=int, default=40)
+    stage2_real.add_argument(
+        "--backends",
+        default="codex,codebuddy",
+        help="comma-separated backends to exercise",
     )
     return parser
 
@@ -266,6 +281,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "cancel":
         result = _run_cancel(
             Path.cwd(), args.db, args.run_id, args.task_id, args.reason
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "ready" else 1
+    if args.command == "stage2-real":
+        result = run_stage2_real(
+            Path.cwd(),
+            database_path=args.db,
+            run_id=args.run_id,
+            max_ticks=args.max_ticks,
+            backends=tuple(
+                item.strip()
+                for item in args.backends.split(",")
+                if item.strip()
+            ),
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "ready" else 1

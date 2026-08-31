@@ -2,7 +2,7 @@
 
 更新时间：2026-08-31
 
-状态：**进行中。前六切片“状态 Reconciler”“Agent Runtime / Fake Pool”“可恢复 Fake Scheduler 闭环”“Run Controller fencing”“Task DAG / 优先级退避”和“Pause / Resume / Cancel 与后台控制循环”已完成，尚未满足阶段 2 全部退出条件。**
+状态：**进行中。前七切片已完成（S2-01~S2-06 全部退出条件满足，S2-07 的 Codex 真实接入已验证）；S2-07 的真实 CodeBuddy 场景验证因厂商 5 小时用量配额（429，21:35 重置）受阻，尚未满足阶段 2 全部退出条件。**
 
 ## 本切片范围
 
@@ -86,11 +86,22 @@
 - 第六切片结束时共 116 项单元、契约和 Fake 集成测试全部通过（新增 15 项覆盖取消前、启动中、运行中 interrupt、完成竞态、重复取消、失权接管、Pause/Resume、Run 级取消、后台循环启停与 90 秒内过期租约回收）；无落盘编译通过，凭据特征扫描为 0。
 - 环境适配：git 2.55.0 的 `worktree add -b` 对带斜杠分支名回归（`poc/worker` 报 `invalid reference`），`git_manager.py` 分支前缀改为 `poc-`（语义不变，阶段 1 测试不依赖分支名），基线恢复全绿后本切片才继续。
 
+## 第七切片：真实 Codex / CodeBuddy Adapter 接入统一 Scheduler（进行中）
+
+- 新增 `orchestrator/adapters/real.py`，把阶段 1 已验证的真实调用封装为统一 `BackendAdapter` 契约（`start()` → `RunningCall`，支持 `wait()/cancel()`），不复制第二套状态机：
+  - `CodexBackendAdapter`：基于 `openai_codex` SDK（`thread_start` + `turn.run()`），只读 sandbox、`deny_all` 审批；取消用 `turn.interrupt()`；结束归档 thread 并关闭 client；映射 SUCCEEDED/FAILED/TIMED_OUT/CANCELLED 与 usage。
+  - `CodeBuddyBackendAdapter`：基于 `codebuddy_agent_sdk`（`authenticate` + `query`），中国站固定 `CODEBUDDY_INTERNET_ENVIRONMENT=internal`；`auth.auth_url` 或 CLI 缺失返回 `BLOCKED/backend_invoked=false`；SDK 无硬中断，取消返回 `CANCEL_REQUESTED/backend_may_still_run=true`，晚到结果由编排器隔离为 late。
+  - `_BlockedRunningCall`：登录缺失 / CLI 不可用等前置失败零后端副作用立即 BLOCKED。
+- 新增 `orchestrator/poc/stage2_real.py` + CLI `stage2-real`（`--backends codex,codebuddy`）：冻结 6 个只读场景（3 Codex + 3 CodeBuddy，要求精确 marker），经统一 Scheduler 派发执行，**厂商故障（sdk_error/429/配额/login）与模型内容质量（content_matched）分开统计**；报告写入 `.agent-hub/reports/`。
+- **Codex 真实接入已验证**：`stage2-real --backends codex` 跑通 3 个冻结场景，全部 `REVIEW`、`call_state=succeeded`、`content_matched=true`，`vendor_faults=[]`、`quality_failures=[]`、`status=ready`；证明真实 Codex adapter → 统一 Scheduler → 状态机收敛全链路可用。报告：`.agent-hub/reports/run-stage2-real-*.json`。
+- **CodeBuddy 真实场景受阻**：登录链路本身正常，但中国站账号当前命中 5 小时用量配额（`429 You have exceeded the 5-hour usage quota`，21:35 重置）。这是厂商用量限制，记为厂商故障统计项；配额恢复后重跑 `stage2-real --backends codebuddy` 即可补验，代码路径无需改动。
+- 第七切片新增 5 项 adapter 形状 / BLOCKED 契约单元测试（不消耗真实用量）；当前 121 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
+
 ## 明确未完成
 
-- 已有后台周期循环与过期租约回收（90 秒内），但还没有真实 Codex / CodeBuddy Adapter 接入统一 Scheduler；当前闭环只使用确定性 Fake Adapter。
+- S2-07 剩余：CodeBuddy 真实场景（3 个）待配额恢复后重跑；"同时运行 2 个 CodeBuddy + 1 个 Codex"的并行真实验证待 CodeBuddy 可用后执行；冻结 10 个真实场景至少 9 个正确编排终态的完整验收未满足。
 - 还没有持久 Merge Queue / Outbox、进程重启后的 Git 对账和“不重复 merge”证明。
 - 还没有预算门禁、人工审批命令和业务层 supervisor handoff（业务 `AuthorityLease` 未实现，不与 Run Controller lease 混淆）。
 - 还没有正式的状态页 / 时间线 / 成本视图；CLI 控制命令已可人工执行。
 
-下一切片应把已验证的 Codex / CodeBuddy PoC 调用适配到统一 Scheduler（S2-07），随后实现写范围串行化与持久 Merge Queue / Outbox（S2-08）。
+下一切片在 CodeBuddy 配额恢复后先补验 S2-07 剩余场景，再实现写范围串行化与持久 Merge Queue / Outbox（S2-08）。

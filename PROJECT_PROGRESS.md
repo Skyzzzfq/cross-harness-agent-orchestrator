@@ -82,7 +82,12 @@
    - 后台常驻循环（`serve`）：controller 常驻续租、失权退出、接管恢复、明确启停；过期租约 90 秒内回收已验证。
    - CLI 新增 `serve / pause / resume / cancel` 命令；环境适配 git 2.55.0 worktree 斜杠分支名回归（`poc/` → `poc-`）。
 
-当前验证：116 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
+7. 真实 Codex / CodeBuddy Adapter 接入统一 Scheduler（S2-07，进行中）
+   - `orchestrator/adapters/real.py`：Codex（openai_codex SDK，turn.interrupt 取消）与 CodeBuddy（codebuddy_agent_sdk，中国站 internal，SDK 无硬中断则 CANCEL_REQUESTED+late 隔离）统一 BackendAdapter 契约，不复制第二套状态机。
+   - `stage2-real` CLI + 冻结 6 个只读场景（3 Codex + 3 CodeBuddy），厂商故障（429/配额/login/sdk_error）与模型内容质量（content_matched）分开统计。
+   - **Codex 侧已验证**：3 个冻结场景全部 REVIEW + content_matched=true，厂商/质量失败 0。**CodeBuddy 侧受阻**：中国站命中 5 小时用量配额（429，21:35 重置），登录链路正常，待配额恢复后重跑 `stage2-real --backends codebuddy` 补验。
+
+当前验证：121 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
 ## 3. 阶段 2 尚未完成：WorkBuddy 应按此顺序继续
 
@@ -101,11 +106,13 @@
 
 ### S2-07：真实 Codex / 中国站 CodeBuddy 接入统一 Scheduler
 
-- [ ] 把阶段 1 已验证的两个真实 Adapter 接到统一 `BackendAdapter`/Scheduler，不复制第二套状态机。
-- [ ] 同时运行 2 个 CodeBuddy Agent + 1 个 Codex Agent。
-- [ ] 冻结 10 个真实场景，至少 9 个获得正确编排终态。
-- [ ] 厂商故障与模型内容质量分开统计。
-- [ ] 继续使用 ChatGPT Plus 登录；不得要求 OpenAI API Key。
+- [x] 把阶段 1 已验证的两个真实 Adapter 接到统一 `BackendAdapter`/Scheduler，不复制第二套状态机（`real.py`，Codex 侧真实验证通过）。
+- [ ] 同时运行 2 个 CodeBuddy Agent + 1 个 Codex Agent（CodeBuddy 配额阻塞，待 21:35 重置后补验）。
+- [ ] 冻结 10 个真实场景，至少 9 个获得正确编排终态（当前冻结 6 个，Codex 3 个已过；CodeBuddy 3 个待配额）。
+- [x] 厂商故障与模型内容质量分开统计（`stage2-real` 报告含 `vendor_faults`/`quality_failures`）。
+- [x] 继续使用 ChatGPT Plus 登录；不得要求 OpenAI API Key（未引入 API Key，Codex 走 saved-login，CodeBuddy 走中国站账号）。
+
+补验命令（配额恢复后）：`./.venv/Scripts/python.exe -m orchestrator stage2-real --backends codebuddy`
 
 ### S2-08：写范围、Merge Queue、Outbox 与 Git 恢复
 
