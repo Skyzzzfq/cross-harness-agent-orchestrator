@@ -82,10 +82,12 @@
    - 后台常驻循环（`serve`）：controller 常驻续租、失权退出、接管恢复、明确启停；过期租约 90 秒内回收已验证。
    - CLI 新增 `serve / pause / resume / cancel` 命令；环境适配 git 2.55.0 worktree 斜杠分支名回归（`poc/` → `poc-`）。
 
-7. 真实 Codex / CodeBuddy Adapter 接入统一 Scheduler（S2-07，进行中）
+7. 真实 Codex / CodeBuddy Adapter 接入统一 Scheduler（S2-07，已完成）
    - `orchestrator/adapters/real.py`：Codex（openai_codex SDK，turn.interrupt 取消）与 CodeBuddy（codebuddy_agent_sdk，中国站 internal，SDK 无硬中断则 CANCEL_REQUESTED+late 隔离）统一 BackendAdapter 契约，不复制第二套状态机。
-   - `stage2-real` CLI + 冻结 6 个只读场景（3 Codex + 3 CodeBuddy），厂商故障（429/配额/login/sdk_error）与模型内容质量（content_matched）分开统计。
-   - **Codex 侧已验证**：3 个冻结场景全部 REVIEW + content_matched=true，厂商/质量失败 0。**CodeBuddy 侧受阻**：中国站命中 5 小时用量配额（429，21:35 重置），登录链路正常，待配额恢复后重跑 `stage2-real --backends codebuddy` 补验。
+   - `stage2-real` CLI + 冻结 10 个只读场景（5 Codex + 5 CodeBuddy），厂商故障（429/配额/login/sdk_error）与模型内容质量（content_matched）分开统计。
+   - **10/10 冻结场景全部通过**：5 Codex + 5 CodeBuddy 全部 REVIEW + content_matched=true，vendor/quality 失败 0。
+   - **2 CodeBuddy + 1 Codex 并行验证通过**（`stage2-mixed`）：workers_overlapped=true，真实时间重叠。
+   - 真实验证期间 CodeBuddy 曾命中 5 小时用量配额（429，21:35 重置，厂商用量限制），配额恢复后补验即通过，代码路径无需改动。
 
 当前验证：121 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
@@ -106,13 +108,13 @@
 
 ### S2-07：真实 Codex / 中国站 CodeBuddy 接入统一 Scheduler
 
-- [x] 把阶段 1 已验证的两个真实 Adapter 接到统一 `BackendAdapter`/Scheduler，不复制第二套状态机（`real.py`，Codex 侧真实验证通过）。
-- [ ] 同时运行 2 个 CodeBuddy Agent + 1 个 Codex Agent（CodeBuddy 配额阻塞，待 21:35 重置后补验）。
-- [ ] 冻结 10 个真实场景，至少 9 个获得正确编排终态（当前冻结 6 个，Codex 3 个已过；CodeBuddy 3 个待配额）。
+- [x] 把阶段 1 已验证的两个真实 Adapter 接到统一 `BackendAdapter`/Scheduler，不复制第二套状态机（`real.py`）。
+- [x] 同时运行 2 个 CodeBuddy Agent + 1 个 Codex Agent（`stage2-mixed`：workers_overlapped=true，真实时间重叠）。
+- [x] 冻结 10 个真实场景，至少 9 个获得正确编排终态（10/10 全部正确：5 Codex + 5 CodeBuddy 均 REVIEW + content_matched）。
 - [x] 厂商故障与模型内容质量分开统计（`stage2-real` 报告含 `vendor_faults`/`quality_failures`）。
 - [x] 继续使用 ChatGPT Plus 登录；不得要求 OpenAI API Key（未引入 API Key，Codex 走 saved-login，CodeBuddy 走中国站账号）。
 
-补验命令（配额恢复后）：`./.venv/Scripts/python.exe -m orchestrator stage2-real --backends codebuddy`
+验收证据：`.agent-hub/reports/run-stage2-real-007520622d15.json`（10 场景）、`.agent-hub/reports/run-stage2-mixed-3ff33b31b53d.json`（并行）。
 
 ### S2-08：写范围、Merge Queue、Outbox 与 Git 恢复
 

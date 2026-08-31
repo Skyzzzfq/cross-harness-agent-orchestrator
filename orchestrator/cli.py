@@ -14,7 +14,7 @@ from orchestrator.poc.fake_demo import run_fake_demo
 from orchestrator.poc.git_demo import run_git_demo
 from orchestrator.poc.recovery_demo import run_recovery_demo
 from orchestrator.poc.real_demo import run_real_demo
-from orchestrator.poc.stage2_real import run_stage2_real
+from orchestrator.poc.stage2_real import run_mixed_parallel, run_stage2_real
 from orchestrator.reconciler import run_reconciler_once
 from orchestrator.serve import serve
 from orchestrator.adapters.codebuddy_spike import run_codebuddy_session_spike
@@ -113,6 +113,15 @@ def _parser() -> argparse.ArgumentParser:
         default="codex,codebuddy",
         help="comma-separated backends to exercise",
     )
+    stage2_mixed = subcommands.add_parser(
+        "stage2-mixed",
+        help="run 2 CodeBuddy workers + 1 Codex worker in parallel",
+    )
+    stage2_mixed.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    stage2_mixed.add_argument("--run", dest="run_id")
+    stage2_mixed.add_argument("--max-ticks", type=int, default=20)
     return parser
 
 
@@ -295,6 +304,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for item in args.backends.split(",")
                 if item.strip()
             ),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] == "ready" else 1
+    if args.command == "stage2-mixed":
+        result = run_mixed_parallel(
+            Path.cwd(),
+            database_path=args.db,
+            run_id=args.run_id,
+            max_ticks=args.max_ticks,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "ready" else 1
