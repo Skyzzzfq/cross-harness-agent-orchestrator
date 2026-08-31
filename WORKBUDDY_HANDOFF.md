@@ -1,54 +1,87 @@
-# WorkBuddy 继续开发交接单
+# WorkBuddy 当前整改交接单
 
-## 可直接发给 WorkBuddy 的任务说明
+更新时间：2026-09-01
+审计基线提交：87b875e；实际接手点以远端 main 为准
+阶段状态：**Stage 2 AUDIT-OPEN；Stage 3 禁止开始。**
 
-请继续开发 `cross-harness-agent-orchestrator`，当前只能推进阶段 2，不得开始阶段 3。
+## 1. 开始前阅读
 
-开始前完整阅读：
+按顺序完整阅读：
 
-1. `AGENTS.md`
-2. `PROJECT_PROGRESS.md`
-3. `跨Harness多Agent团队编排系统实施计划.md`
-4. `STAGE2_REPORT.md`
+1. AGENTS.md
+2. PROJECT_PROGRESS.md
+3. STAGE2_AUDIT_FINDINGS.md
+4. STAGE2_AUDIT_RESPONSE.md
+5. 跨Harness多Agent团队编排系统实施计划.md
+6. STAGE2_REPORT.md
 
-当前已完成到 schema v8：Run Controller epoch fencing、Controller/Assignment Lease 自动续租、Agent Pool、可恢复 Fake Scheduler、Task DAG、优先级和指数退避。全量 101 项测试通过。Run Controller 只是 Orchestrator 执行控制权，不是业务 Supervisor AuthorityLease。
+审计问题清单和 WorkBuddy 对账回复作为不可改写的审计基线。修复状态写入 PROJECT_PROGRESS.md 和 STAGE2_REPORT.md。
 
-你的第一个任务是 `PROJECT_PROGRESS.md` 的 S2-06：实现完整 Pause / Resume / Cancel 与后台控制循环。要求先补失败测试；所有状态变化和审计事件同事务；旧 controller、旧 generation 和取消后的 late result 都不得推进审核或集成。每次行为变化后运行全量测试。
+## 2. 当前基线
 
-完成 S2-06 后：
+- 审计与对账基线：87b875e；状态对齐提交以远端 main 为准。
+- schema v12。
+- 150 项测试通过。
+- 阶段 0、阶段 1 签字有效。
+- 原 d2519fe Stage 2 complete 签字已撤销。
+- 已确认 3 项 P0、6 项 P1、4 项文档问题。
+- 现有真实场景只证明只读 Adapter 到达 REVIEW 和三路真实重叠，不代表完整 Task 终态。
 
-- 更新 `STAGE2_REPORT.md` 和 `PROJECT_PROGRESS.md`；
-- 不得把阶段 2 标记为完成；
-- 提交信息使用 `stage2: checkpoint pause cancel and controller loop`；
-- 推送到同一 GitHub 仓库；
-- 然后按 S2-07、S2-08、S2-09、S2-10 顺序继续。
+## 3. 第一个任务
 
-账号和安全边界：
+只处理 P0-01：Authority 与 takeover fencing。
 
-- Codex 使用 ChatGPT Plus 登录，没有 OpenAI API Key；不要要求用户购买 API 额度。
-- CodeBuddy 必须使用中国站配置。
-- 运行状态、下载工具和缓存只放 `.agent-hub/`。
-- 不读取、打印或提交 credential、token、cookie、Session secret。
-- 不修改用户 checkout；写任务只进入受管 worktree。
+要求：
 
-## 接手前快速核验
+- 先补失败测试，证明旧 authority epoch 仍能通过当前接口派发、入队、领取或完成 merge。
+- 派发、审核、入队集成、领取集成和完成集成都必须原子校验当前 AuthorityToken。
+- ACTIVE authority 不得被普通 acquire 无条件覆盖。
+- 强制接管必须是单独、人工审批、可审计的恢复流程。
+- 旧 epoch 的每个主管动作必须零副作用。
+- 不要在本切片顺便修改路径、Merge/Outbox 或 Adapter。
 
-```powershell
-git status --short
-python -m unittest discover -s tests -v
-python -m orchestrator status
-```
+完成后：
 
-预期基线：测试全绿，数据库 schema v8，阶段 2 报告状态仍是“进行中”。如果基线不符，先记录差异，不要静默覆盖。
+- 运行全量测试。
+- 更新 PROJECT_PROGRESS.md 和 STAGE2_REPORT.md。
+- 提交信息：stage2: checkpoint enforce authority and takeover fencing。
+- 推送并记录远端 SHA。
 
-## 完成一个阶段时
+## 4. 后续顺序
 
-只有该阶段全部退出条件都满足并在阶段报告签字后，才可以：
+1. P0-03：canonical workspace 和 write_scope。
+2. P0-02 + P1-06：Transactional Merge、Git、Outbox 和重试。
+3. P1-02 + P1-03：完整预算和可消费审批。
+4. P1-04 + P1-05：真实 writable Scheduler、超时、取消和脱敏。
+5. P1-01：修正 terminal 口径，重跑 Fake 与真实完整退出矩阵。
+6. 修正文档并重新签字 Stage 2。
 
-```powershell
-git add -A
-git commit -m "stageN: complete <short description>"
-git push
-```
+不得跳步，不得提前开始 Stage 3。
 
-提交后在 `PROJECT_PROGRESS.md` 记录 commit SHA 和远端验证结果。阶段未完成只能使用 `checkpoint`，不能使用 `complete`。
+## 5. 安全边界
+
+- Codex 使用 ChatGPT Plus saved login，不要求 OpenAI API Key。
+- CodeBuddy 固定中国站 internal 环境。
+- 不读取、打印、提交 token、cookie、credential 或 Session secret。
+- 运行状态、工具和报告只放 .agent-hub/。
+- 写任务只能进入受管 worktree；用户 checkout 不得修改。
+- 失败证据不得删除或挑样。
+
+## 6. 接手核验
+
+在项目根目录执行：
+
+    & '.venv\Scripts\python.exe' -m unittest discover -s tests -v
+    & '.venv\Scripts\python.exe' -m orchestrator status
+    git status --short
+    git log --oneline --decorate -15
+    git ls-remote --heads origin main
+
+如果基线与本文不符，先在 PROJECT_PROGRESS.md 记录差异，不要静默覆盖。
+
+## 7. 提交纪律
+
+- 修复期间只能使用 stage2: checkpoint ...。
+- 每次行为变化后运行全量测试。
+- 每个切片同时更新 PROJECT_PROGRESS.md 和 STAGE2_REPORT.md。
+- 只有全部审计问题关闭、完整退出条件重新通过且真实证据齐全后，才能创建新的 stage2: complete ...。

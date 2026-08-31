@@ -2,7 +2,9 @@
 
 这是一个本地多 Agent 编排器，目标是让 Codex 与 CodeBuddy/WorkBuddy 在同一项目中承担可配置的主管、执行和审核职位。
 
-当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2 的状态 Reconciler、Agent Runtime、持久 Backend Call、1/2/4 Fake Agent Pool、可恢复 Fake Scheduler、Run Controller fencing、Task DAG 和优先级退避已完成，MVP 其余部分进行中。**
+当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2 为 AUDIT-OPEN，已确认 3 项 P0 和 6 项 P1，整改完成前禁止进入阶段 3。** 当前代码包含 Reconciler、Agent Runtime、Fake Scheduler、真实只读 Adapter、Merge/Outbox/Authority 等组件，但完整权限、路径、Git 事务和真实写任务闭环尚未通过验收。
+
+当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。继续开发必须从 [WORKBUDDY_HANDOFF.md](WORKBUDDY_HANDOFF.md) 的 P0-01 开始。
 
 ## 当前交付范围
 
@@ -40,7 +42,7 @@
 
 `init` 会校验 [团队配置](config/team.yaml)，并把运行状态初始化到 `.agent-hub/state/agent-hub.db`。配置文件采用 JSON-compatible YAML 1.2，以便编排核心继续只依赖 Python 标准库。
 
-`status --run` 提供隔离的单 Run 只读汇总；`reconcile` 执行一次显式状态协调，只回收已过期且仍为 ACTIVE 的 Assignment Lease。恢复时会再次按 generation、状态和同一 cutoff 做条件更新，避免扫描后 Worker 已续租却被误回收。当前尚未启动后台常驻循环。
+`status --run` 提供隔离的单 Run 只读汇总；`reconcile` 执行一次显式状态协调，只回收已过期且仍为 ACTIVE 的 Assignment Lease。恢复时会再次按 generation、状态和同一 cutoff 做条件更新，避免扫描后 Worker 已续租却被误回收。当前已有后台常驻控制循环，但 CLI `serve` 仍只注册 Fake Adapter，真实 Adapter、Review、Git Merge 和 Outbox 尚未接入同一常驻闭环。
 
 `demo --fake` 不调用在线模型，用于验证两个 Worker 的并行、Reviewer 驳回和新 Attempt 返工。运行报告写入 `.agent-hub/reports/`。
 
