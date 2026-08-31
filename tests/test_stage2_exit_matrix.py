@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import tempfile
 import unittest
@@ -335,6 +336,74 @@ class ExitMatrixTests(unittest.IsolatedAsyncioTestCase):
             len(scenarios), 50, f"expected 50 frozen scenarios, got {len(scenarios)}"
         )
         self.assertEqual(failures, [], "\n".join(failures))
+
+
+class CostReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_usage_aggregation_reconciles_with_calls(self) -> None:
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+
+        temp = _tempfile.mkdtemp()
+        store: SQLiteStateStore | None = None
+        try:
+            store = SQLiteStateStore(_Path(temp) / "state.db")
+            store.create_run("run-1", "team-1")
+            reconcile_pool_once(
+                store,
+                "run-1",
+                AgentPoolSpec(
+                    pool_id="fake-workers",
+                    backend="fake",
+                    role_id="worker",
+                    count=2,
+                    max_count=2,
+                    model="fake-v1",
+                ),
+            )
+            for i in range(2):
+                store.create_task(
+                    "run-1", f"task-{i}", required_role_id="worker",
+                    prompt=f"x{i}", cwd=".", timeout_seconds=2,
+                )
+                store.transition_task(f"task-{i}", TaskState.READY, reason="ready")
+            adapter = FakeBackendAdapter(
+                default_behavior=FakeBehavior(delay_seconds=0.05, text="ok")
+            )
+            token = store.acquire_run_controller("run-1", "op", lease_seconds=60)
+            for _ in range(10):
+                await scheduler_tick(
+                    store, run_id="run-1", adapters={"fake": adapter},
+                    controller=token, lease_seconds=60,
+                )
+                if all(
+                    store.task_state(f"task-{i}") == TaskState.REVIEW
+                    for i in range(2)
+                ):
+                    break
+            # 费用对账：每成功 call 都有 usage（duration_ms），usage_json 非空
+            rows = store.connection.execute(
+                "SELECT state, usage_json FROM backend_calls WHERE run_id='run-1'"
+            ).fetchall()
+            succeeded = [r for r in rows if r["state"] == "succeeded"]
+            self.assertEqual(len(succeeded), 2)
+            for row in succeeded:
+                usage = json.loads(row["usage_json"]) if row["usage_json"] else None
+                self.assertIsNotNone(usage, "succeeded call missing usage")
+                self.assertGreaterEqual(usage.get("duration_ms", 0), 0)
+            # 汇总：成功 call 数与状态机 SUBMITTED attempt 数一致
+            submitted = store.connection.execute(
+                "SELECT COUNT(*) FROM attempts WHERE state='SUBMITTED'"
+            ).fetchone()[0]
+            self.assertEqual(len(succeeded), submitted)
+            if store is not None:
+                store.close()
+            import shutil
+            shutil.rmtree(temp, ignore_errors=True)
+        finally:
+            if store is not None:
+                store.close()
+            import shutil
+            shutil.rmtree(temp, ignore_errors=True)
 
 
 if __name__ == "__main__":

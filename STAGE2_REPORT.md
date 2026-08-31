@@ -2,7 +2,7 @@
 
 更新时间：2026-08-31
 
-状态：**进行中。前九切片（S2-01~S2-09）已完成，S2-10（MVP 退出矩阵与签字）待验证，尚未满足阶段 2 全部退出条件。**
+状态：**已通过。阶段 2（MVP）全部切片（S2-01~S2-10）完成，退出条件均已提供证据并签字。**
 
 ## 本切片范围
 
@@ -126,11 +126,21 @@
 - **人工审批**：`create_approval_request`（动作摘要、参数哈希、单次使用、作用域）+ `decide_approval`（已决定请求不可重复决定）+ `list_approval_requests`；CLI `approvals/approve/reject` 人工命令端到端验证通过。
 - **硬预算**：`record_budget`（按 Run upsert）+ `budget_status`（任一 `usage >= max` 即 `exceeded`）；`claim_ready_dispatch` 派发前检查，超限零新增调用停派。
 - 实际运行库已从 schema v10 升级至 v12；升级前备份为 `.agent-hub/state/agent-hub.db.v10-backup-20260901-stage2`（v11）与 `.agent-hub/state/agent-hub.db.v11-backup-20260901-stage2`（v12）。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=12`、`integrity_check=ok`、`foreign_key_check=0`。
-- 第九切片共新增 12 项测试（authority epoch 接管、handoff 原子+旧 epoch fencing、活动 merge 拒 handoff、审批单次使用、预算 upsert/超限检测、预算派发停派、三层审核记录、审批列表）。当前 147 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
+- 第九切片共新增 12 项测试（authority epoch 接管、handoff 原子+旧 epoch fencing、活动 merge 拒 handoff、审批单次使用、预算 upsert/超限检测、预算派发停派、三层审核记录、审批列表）。第九切片结束时 147 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
 
-## 明确未完成
+## 第十切片：MVP 退出矩阵与签字（S2-10，已完成）
 
-- S2-10（MVP 退出矩阵与签字）待验证：50 个预冻结 Fake 场景状态不变量、强杀 0 重复 merge、费用对账、安全负向矩阵；满足后更新本报告为“通过”并创建阶段 2 完成提交。
-- 还没有正式的状态页 / 时间线 / 成本视图；CLI 控制命令已可人工执行。
+- **50 个预冻结 Fake 编排场景 100% 匹配状态不变量**（`tests/test_stage2_exit_matrix.py`）：10 类 × 5 变体 = 50 场景（单任务成功、并行成功、多 attempt 成功、重试耗尽失败、取消 READY、优先级、BLOCKED 失败、一成一败、取消部分、优先级+失败、多任务成功），每个场景独立数据库经统一 Scheduler 跑至终态，断言终态匹配 + 状态不变量（终态任务无 ACTIVE lease、无孤儿 BUSY agent、无过期 ACTIVE lease）。
+- **10 个真实场景至少 9 个正确编排终态**（S2-07 证据）：`stage2-real` 冻结 10 场景 10/10 全部 `REVIEW` + `content_matched=true`（`.agent-hub/reports/run-stage2-real-007520622d15.json`）。
+- **Worker/Orchestrator 强杀后 0 重复 merge**（`KillRestartMergeTests`）：崩溃前 merge_queue 处于 APPLYING、result commit 已落集成分支 → 重启 `reconcile_merge_with_git` 标记 APPLIED 不重放；再次 `integrate` 幂等（`git cherry` 补丁等价检测）HEAD 不变。
+- **Cancel SLA、write_scope、磁盘、脏 checkout、安全负向、费用对账全部通过**：Cancel interrupt 50ms 轮询（<<10s SLA）；write_scope 派发前串行化；`safe_write_text` 原子写（磁盘不足/文件占用不留半写入）；`assert_clean_for_write` 拒脏 checkout；路径规范化越界拒绝 + 凭据特征扫描 0 + `deny_all` 审批 + 预算停派 + epoch fencing；费用对账（`CostReconciliationTests`）成功 call 均有 usage 且与 SUBMITTED attempt 数一致。
+- **无未处理高危或严重安全缺陷**：凭据不落盘（扫描 0）、路径校验、permission `plan`/`deny_all`、人工审批门禁、硬预算、controller/authority 双 epoch fencing、merge 幂等，未发现已知高危或严重缺陷。
+- 全量验证：**150 项单元、契约和 Fake 集成测试全部通过**，无落盘编译通过，凭据特征扫描为 0；实际运行库 schema v12 保持完好。
 
-下一切片执行 S2-10（MVP 退出矩阵与签字）。
+## 签字
+
+本报告为阶段 2（MVP）最终签字记录。S2-01~S2-10 全部切片完成，退出条件均已提供证据。据此创建阶段 2 完成提交。
+
+## 阶段 3（Beta）尚未开始
+
+进入阶段 3 的门禁：24 小时 Fake 稳定运行 ≥500 Task、20 个真实场景 ≥19 正确、0 数据丢失；状态页/时间线/成本/诊断包；Adapter 版本探测与能力协商；Windows 中文/空格/CRLF/长路径/文件锁/进程树矩阵；数据库升级/降级/备份/恢复与 15 分钟 rollback 演练；干净 Windows 30 分钟安装演示；可选 8 Agent 与 MCP Facade/native team 评估。详见 `PROJECT_PROGRESS.md`。

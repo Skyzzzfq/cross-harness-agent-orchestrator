@@ -127,5 +127,55 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "PENDING")
 
 
+class KillRestartMergeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.manager = GitWorkspaceManager(root / "repo", root / "worktrees")
+        self.base = self.manager.initialize_repository()
+        self.store = SQLiteStateStore(root / "state.db")
+        self.store.create_run("run-1", "team-1")
+        self.store.create_task("run-1", "task-1")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp.cleanup()
+
+    def test_kill_restart_marks_applied_without_duplicate_merge(self) -> None:
+        # Worker 提交 result commit 并已集成到集成分支（模拟崩溃前已完成但状态未落库）
+        worktree = self.manager.create_worktree("worker", self.base)
+        result_commit = self.manager.commit_file(
+            worktree, "demo/a.txt", "crash-recovery-result\n", "worker: result"
+        )
+        self.manager.integrate(result_commit)
+        head_before = self.manager.head(self.manager.repository)
+
+        # 崩溃前 merge_queue 处于 APPLYING
+        token = self.store.acquire_run_controller("run-1", "ghost", lease_seconds=60)
+        self.store.enqueue_merge(
+            "run-1", "task-1", "attempt-1", result_commit, self.base,
+            token, reason="review-passed",
+        )
+        claim = self.store.claim_merge_queue("run-1", token)
+        self.store.release_run_controller(token)
+
+        # 重启后对账：result commit 已在集成分支 → 标记 APPLIED，不重复 merge
+        new_token = self.store.acquire_run_controller("run-1", "restarted", lease_seconds=60)
+        result = self.store.reconcile_merge_with_git(
+            "run-1", new_token,
+            is_applied=lambda commit: self.manager.result_commit_in_integration(commit),
+        )
+        self.assertIn(claim["merge_id"], result["marked_applied"])
+        self.assertEqual(result["reapplied"], [])
+        row = self.store.connection.execute(
+            "SELECT status FROM merge_queue WHERE merge_id=?", (claim["merge_id"],)
+        ).fetchone()
+        self.assertEqual(row["status"], "APPLIED")
+
+        # 再次 integrate 同一 commit：幂等，集成分支 HEAD 不变 → 0 重复 merge
+        self.manager.integrate(result_commit)
+        self.assertEqual(self.manager.head(self.manager.repository), head_before)
+
+
 if __name__ == "__main__":
     unittest.main()

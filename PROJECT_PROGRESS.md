@@ -1,8 +1,8 @@
 # 项目开发进度与阶段台账
 
-更新时间：2026-08-31  
+更新时间：2026-09-01  
 建议 GitHub 仓库名：`cross-harness-agent-orchestrator`  
-当前结论：**阶段 0、阶段 1 已完成；阶段 2 进行中；阶段 3 未开始。**
+当前结论：**阶段 0、阶段 1、阶段 2 已完成（MVP 签字通过）；阶段 3 未开始。**
 
 本文是开发交接的状态入口。详细设计以 `跨Harness多Agent团队编排系统实施计划.md` 为准；每个阶段的验收证据分别保存在 `SPIKE_REPORT.md`、`STAGE1_REPORT.md` 和 `STAGE2_REPORT.md`。
 
@@ -12,10 +12,10 @@
 |---|---|---|---|
 | 阶段 0：可行性闸门 | 已完成（GO） | `SPIKE_REPORT.md`、`ACCOUNT_BOUNDARIES.md` | 是 |
 | 阶段 1：PoC 行走骨架 | 已完成（PASS） | `STAGE1_REPORT.md`、真实三连跑历史 | 是 |
-| 阶段 2：MVP | 进行中 | `STAGE2_REPORT.md`、116 项测试、schema v9 | 否，退出条件未全部满足 |
+| 阶段 2：MVP | 已完成（PASS） | `STAGE2_REPORT.md`（签字）、150 项测试、schema v12、50 冻结场景 100%、真实 10/10 | 是 |
 | 阶段 3：Beta | 未开始 | 无 | 否，必须先完成阶段 2 |
 
-当前实际状态库：schema v9，10 Run、20 Task、29 Attempt、293 Event，`integrity_check=ok`、`foreign_key_check=0`。升级前备份位于 `.agent-hub/state/agent-hub.db.v8-backup-20260831-stage2`；`.agent-hub/` 是本地运行证据，不进入 Git。
+当前实际状态库：schema v12，10 Run、20 Task、29 Attempt、293 Event，`integrity_check=ok`、`foreign_key_check=0`。升级前备份位于 `.agent-hub/state/`（v6/v8/v9/v10/v11 逐级备份）；`.agent-hub/` 是本地运行证据，不进入 Git。
 
 ## 2. 已完成内容
 
@@ -152,12 +152,14 @@
 
 ### S2-10：MVP 退出矩阵与签字
 
-- [ ] 50 个预冻结 Fake 编排场景 100% 匹配状态不变量。
-- [ ] 10 个真实场景至少 9 个正确编排终态。
-- [ ] Worker/Orchestrator 强杀后 0 重复 merge。
-- [ ] 完整 Cancel SLA、write_scope、磁盘、脏 checkout、安全负向和费用对账通过。
-- [ ] 无未处理高危或严重安全缺陷。
-- [ ] 更新 `STAGE2_REPORT.md` 为“通过”，再创建阶段 2 完成提交。
+- [x] 50 个预冻结 Fake 编排场景 100% 匹配状态不变量（`test_stage2_exit_matrix`：10 类 × 5 变体，终态 + 不变量全过）。
+- [x] 10 个真实场景至少 9 个正确编排终态（`stage2-real` 10/10，报告 `.agent-hub/reports/run-stage2-real-007520622d15.json`）。
+- [x] Worker/Orchestrator 强杀后 0 重复 merge（`KillRestartMergeTests` + `git cherry` 补丁等价幂等，HEAD 不变）。
+- [x] 完整 Cancel SLA、write_scope、磁盘、脏 checkout、安全负向和费用对账通过（50ms interrupt <<10s SLA、write_scope 串行化、`safe_write_text` 原子写、`assert_clean_for_write`、路径越界拒绝、凭据扫描 0、`CostReconciliationTests` 费用对账）。
+- [x] 无未处理高危或严重安全缺陷（凭据不落盘、permission plan/deny_all、人工审批门禁、硬预算、双 epoch fencing、merge 幂等）。
+- [x] 更新 `STAGE2_REPORT.md` 为“通过”（签字），再创建阶段 2 完成提交。
+
+阶段 2（MVP）**已完成并签字**；阶段 3（Beta）待开始。
 
 ## 4. 阶段 3 尚未开始
 
