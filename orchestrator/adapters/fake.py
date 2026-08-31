@@ -209,8 +209,10 @@ class FakeBackendAdapter:
         *,
         behaviors: dict[str, FakeBehavior] | None = None,
         default_behavior: FakeBehavior | None = None,
+        behaviors_by_task: dict[str, FakeBehavior] | None = None,
     ) -> None:
         self.behaviors = behaviors or {}
+        self.behaviors_by_task = behaviors_by_task or {}
         self.default_behavior = default_behavior or FakeBehavior()
         self.launch_count = 0
         self.cancel_count = 0
@@ -231,7 +233,10 @@ class FakeBackendAdapter:
             active = self._calls[active_call_id][1]
             if not (await active.wait(timeout_seconds=0)).state.is_terminal:
                 raise RuntimeError("session already has an active call")
-        behavior = self.behaviors.get(request.call_id, self.default_behavior)
+        behavior = self.behaviors.get(
+            request.call_id,
+            self.behaviors_by_task.get(request.task_id, self.default_behavior),
+        )
         running = _FakeRunningCall(self, request, behavior)
         self._calls[request.call_id] = (request, running)
         if behavior.terminal != CallState.BLOCKED:
