@@ -2,7 +2,7 @@
 
 更新时间：2026-08-31
 
-状态：**进行中。前八切片（S2-01~S2-07 完成；S2-08 核心持久化完成，Git 层完整集成与安全校验待续），尚未满足阶段 2 全部退出条件。**
+状态：**进行中。前八切片（S2-01~S2-08）已完成，尚未满足阶段 2 全部退出条件。**
 
 ## 本切片范围
 
@@ -99,7 +99,7 @@
 - 继续使用 ChatGPT Plus 设备授权登录，未引入 OpenAI API Key；CodeBuddy 走中国站账号。
 - 第七切片新增 5 项 adapter 形状 / BLOCKED 契约单元测试（不消耗真实用量）；当前 121 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
 
-## 第八切片：写范围串行化、Merge Queue、Outbox 与 Git 恢复（核心持久化已完成）
+## 第八切片：写范围串行化、Merge Queue、Outbox 与 Git 恢复（已完成）
 
 - schema v10 新增三张表：
   - `merge_queue`（`PENDING/APPLYING/APPLIED/CONFLICT/FAILED`，`idempotency_key` 唯一）：持久串行集成队列，只有审核通过的不可变 result commit 入队。
@@ -108,14 +108,14 @@
 - **write_scope 派发前串行化**：`claim_ready_dispatch` 在 `BEGIN IMMEDIATE` 事务内检查同 run 下其他 `ACTIVE` 写任务的 `write_scope_json` 重叠，冲突任务跳过；不重叠写任务仍可并行派发。已声明重叠在派发前被阻断，未声明重叠交由集成阶段检测为 IntegrationIssue。
 - **Merge Queue**：`enqueue_merge` 原子入队（幂等键 `run:task:attempt`），`claim_merge_queue` 只领取 `PENDING` 队首并置 `APPLYING`；`finish_merge` `applied` → Task `REVIEW→INTEGRATION→COMPLETED`，`conflict` → 写 `integration_issues` 且 Task 保持 `REVIEW`（不复活已审核 Attempt）。
 - **Transactional Outbox**：`record_outbox_intent` 与业务副作用同事务记录，`claim_outbox`/`finish_outbox` 投递标记 `SENT/FAILED`。
-- **Merge 对账恢复**：`reconcile_merge_queue` 对遗留 `APPLYING`（非当前 owner）保守重置 `PENDING`，已 `APPLIED` 记录绝不重放（`reapplied=[]`），为"不重复 merge"提供持久化兜底；Git 层 commit trailer 完整对账待下一增量。
+- **Git 层幂等与安全**：`GitWorkspaceManager.integrate` 幂等——用 `git cherry` 补丁等价检测（cherry-pick 产生新 commit，`is_ancestor` 不成立）判断 result commit 是否已落集成分支，已集成则跳过不重复 merge；`result_commit_in_integration` 提供对账判断；`assert_clean_for_write` 拒绝脏 checkout 写任务；`safe_write_text` 原子写（临时文件 + `os.replace`）在磁盘不足/文件占用时不留下半写入；`create_worktree` 失败时清理半创建目录并 `git worktree prune`。
+- **Merge 与 Git 对账**：`reconcile_merge_with_git(run_id, controller, is_applied)` 对遗留 `APPLYING` 记录——`is_applied(result_commit)` 为真则标记 `APPLIED`（绝不重放，`reapplied=[]`），否则安全重置 `PENDING` 重试一次。
 - 实际运行库已从 schema v9 升级至 v10；升级前备份为 `.agent-hub/state/agent-hub.db.v9-backup-20260831-stage2`。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=10`、`integrity_check=ok`、`foreign_key_check=0`。
-- 第八切片新增 7 项测试：重叠 write_scope 串行化、不重叠并行、merge 入队原子领取、merge 成功完成 Task+Outbox、冲突记 IntegrationIssue、对账不重复 apply、outbox 投递流。当前 128 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
+- 第八切片共新增 14 项测试（write_scope 重叠串行化/不重叠并行、merge 入队原子领取、merge 成功完成 Task+Outbox、冲突记 IntegrationIssue、对账不重复 apply、outbox 投递流、integrate 幂等、result commit 补丁检测、脏 checkout 拒绝、原子写安全、worktree 失败清理、merge-with-git 对账 APPLIED/requeue）。当前 135 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
 
 ## 明确未完成
 
-- S2-08 剩余（Git 层完整集成与安全校验）：进程重启后 commit trailer/result commit 完整对账；脏 checkout、磁盘不足、文件占用和半创建 worktree 的安全拒绝或回滚。
 - 还没有预算门禁、人工审批命令和业务层 supervisor handoff（业务 `AuthorityLease` 未实现，不与 Run Controller lease 混淆）。
 - 还没有正式的状态页 / 时间线 / 成本视图；CLI 控制命令已可人工执行。
 
-下一切片补齐 S2-08 的 Git 层对账与安全校验，随后进入 S2-09（审核、人工审批、预算、业务 Supervisor Handoff）。
+下一切片进入 S2-09（确定性验证、模型审核与人工门禁三层分离；人类可执行审批命令；硬预算；业务 Supervisor Handoff）。

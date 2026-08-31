@@ -1726,6 +1726,72 @@ class SQLiteStateStore:
             self.connection.rollback()
             raise
 
+    def reconcile_merge_with_git(
+        self,
+        run_id: str,
+        controller: ControllerToken,
+        is_applied: Any,
+    ) -> dict[str, Any]:
+        """Reconcile APPLYING merges against the real integration branch.
+
+        ``is_applied(result_commit)`` decides whether the result commit already
+        landed on the integration branch (e.g. via commit trailer / ancestor
+        check). Already-applied merges are marked APPLIED and never re-applied;
+        the rest are safely requeued as PENDING for one retry.
+        """
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            rows = self.connection.execute(
+                """
+                SELECT merge_id, task_id, attempt_id, result_commit
+                FROM merge_queue
+                WHERE run_id = ? AND status = 'APPLYING'
+                """,
+                (run_id,),
+            ).fetchall()
+            marked_applied: list[str] = []
+            requeued: list[str] = []
+            for row in rows:
+                merge_id = str(row["merge_id"])
+                result_commit = str(row["result_commit"])
+                try:
+                    landed = bool(is_applied(result_commit))
+                except Exception:
+                    landed = False
+                if landed:
+                    self.connection.execute(
+                        """
+                        UPDATE merge_queue
+                        SET status = 'APPLIED', settled_at = ?
+                        WHERE merge_id = ? AND status = 'APPLYING'
+                        """,
+                        (now, merge_id),
+                    )
+                    marked_applied.append(merge_id)
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE merge_queue
+                        SET status = 'PENDING', claim_owner = NULL, claimed_at = NULL
+                        WHERE merge_id = ? AND status = 'APPLYING'
+                        """,
+                        (merge_id,),
+                    )
+                    requeued.append(merge_id)
+            self.connection.commit()
+            return {
+                "marked_applied": marked_applied,
+                "requeued": requeued,
+                "reapplied": [],
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def record_outbox_intent(
         self,
         run_id: str,
