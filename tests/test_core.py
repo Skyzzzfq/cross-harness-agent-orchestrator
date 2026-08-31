@@ -442,7 +442,7 @@ class SQLiteMigrationTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "PRAGMA user_version"
                 ).fetchone()[0]
-                self.assertEqual(version, 10)
+                self.assertEqual(version, 11)
 
 
 class FakeWalkingSkeletonTests(unittest.TestCase):

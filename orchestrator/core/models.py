@@ -72,6 +72,30 @@ class ControllerToken:
             raise ValueError("controller epoch must be at least 1")
 
 
+@dataclass(frozen=True)
+class AuthorityToken:
+    """Business-level supervisor authority lease (distinct from ControllerToken).
+
+    ``ControllerToken`` protects the orchestrator's run control loop; this token
+    protects the business Supervisor role (who may dispatch, review, integrate),
+    which can be handed off between Codex and CodeBuddy at checkpoints.
+    """
+
+    run_id: str
+    owner_agent_id: str
+    role_id: str
+    epoch: int
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        _required(self.run_id, "authority.run_id")
+        _required(self.owner_agent_id, "authority.owner_agent_id")
+        _required(self.role_id, "authority.role_id")
+        _required(self.expires_at, "authority.expires_at")
+        if self.epoch < 1:
+            raise ValueError("authority epoch must be at least 1")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

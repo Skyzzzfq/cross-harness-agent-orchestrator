@@ -22,6 +22,7 @@ from orchestrator.adapters.contracts import (
 from orchestrator.core.models import (
     AgentState,
     AttemptState,
+    AuthorityToken,
     ControllerToken,
     MessageEnvelope,
     RoleBindingState,
@@ -133,6 +134,10 @@ class FencedAttemptError(RuntimeError):
 
 class FencedControllerError(RuntimeError):
     """Raised when a stale Run controller tries to mutate orchestrator state."""
+
+
+class FencedAuthorityError(RuntimeError):
+    """Raised when a stale business supervisor (old authority epoch) acts."""
 
 
 class SQLiteStateStore:
@@ -1559,7 +1564,7 @@ class SQLiteStateStore:
                 SELECT merge_id, task_id, attempt_id, result_commit, base_commit
                 FROM merge_queue
                 WHERE run_id = ? AND status = 'PENDING'
-                ORDER BY created_at, merge_id
+                ORDER BY created_at, task_id, merge_id
                 LIMIT 1
                 """,
                 (run_id,),
@@ -1791,6 +1796,535 @@ class SQLiteStateStore:
         except BaseException:
             self.connection.rollback()
             raise
+
+    # ---- Business Authority (Supervisor) ----
+
+    def acquire_authority(
+        self,
+        run_id: str,
+        owner_agent_id: str,
+        role_id: str,
+        *,
+        lease_seconds: int = 300,
+        scope: str = "supervisor",
+    ) -> AuthorityToken:
+        if not owner_agent_id.strip() or not role_id.strip():
+            raise ValueError("owner_agent_id and role_id must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            as_of = self._aware_datetime(None)
+            now = as_of.isoformat()
+            expires_at = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+            row = self.connection.execute(
+                "SELECT * FROM authority_leases WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                epoch = 1
+                self.connection.execute(
+                    """
+                    INSERT INTO authority_leases(
+                        lease_id, run_id, owner_agent_id, role_id, scope, epoch,
+                        state, acquired_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                    """,
+                    (
+                        f"authority-{uuid.uuid4().hex[:16]}",
+                        run_id,
+                        owner_agent_id,
+                        role_id,
+                        scope,
+                        epoch,
+                        now,
+                        expires_at,
+                    ),
+                )
+            else:
+                # 每 Run 一行：接管时更新同一行并递增 epoch，旧 epoch 立即失效。
+                epoch = int(row["epoch"]) + 1
+                self.connection.execute(
+                    """
+                    UPDATE authority_leases
+                    SET owner_agent_id = ?, role_id = ?, scope = ?, epoch = ?,
+                        state = 'ACTIVE', acquired_at = ?, expires_at = ?,
+                        handoff_state = NULL, handoff_target_agent_id = NULL,
+                        ended_at = NULL, end_reason = NULL
+                    WHERE run_id = ?
+                    """,
+                    (
+                        owner_agent_id,
+                        role_id,
+                        scope,
+                        epoch,
+                        now,
+                        expires_at,
+                        run_id,
+                    ),
+                )
+            self._append_event(
+                run_id,
+                None,
+                None,
+                "authority.acquired",
+                None,
+                "ACTIVE",
+                {
+                    "owner_agent_id": owner_agent_id,
+                    "role_id": role_id,
+                    "epoch": epoch,
+                },
+            )
+            self.connection.commit()
+            return AuthorityToken(
+                run_id=run_id,
+                owner_agent_id=owner_agent_id,
+                role_id=role_id,
+                epoch=epoch,
+                expires_at=expires_at,
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def renew_authority(
+        self, token: AuthorityToken, *, lease_seconds: int = 300
+    ) -> AuthorityToken:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            as_of = self._aware_datetime(None)
+            now = as_of.isoformat()
+            self._ensure_authority_tx(token, now)
+            expires_at = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+            self.connection.execute(
+                """
+                UPDATE authority_leases SET expires_at = ?
+                WHERE run_id = ? AND owner_agent_id = ? AND epoch = ?
+                  AND state = 'ACTIVE'
+                """,
+                (
+                    expires_at,
+                    token.run_id,
+                    token.owner_agent_id,
+                    token.epoch,
+                ),
+            )
+            self.connection.commit()
+            return AuthorityToken(
+                run_id=token.run_id,
+                owner_agent_id=token.owner_agent_id,
+                role_id=token.role_id,
+                epoch=token.epoch,
+                expires_at=expires_at,
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def active_authority(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            """
+            SELECT lease_id, run_id, owner_agent_id, role_id, scope, epoch,
+                   state, handoff_state, handoff_target_agent_id, acquired_at,
+                   expires_at
+            FROM authority_leases
+            WHERE run_id = ? AND state = 'ACTIVE'
+            """,
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _ensure_authority_tx(
+        self, token: AuthorityToken, now: str
+    ) -> None:
+        row = self.connection.execute(
+            """
+            SELECT owner_agent_id, epoch, expires_at FROM authority_leases
+            WHERE run_id = ? AND state = 'ACTIVE'
+            """,
+            (token.run_id,),
+        ).fetchone()
+        if row is None:
+            raise FencedAuthorityError("no active authority lease")
+        if (
+            row["owner_agent_id"] != token.owner_agent_id
+            or int(row["epoch"]) != token.epoch
+        ):
+            raise FencedAuthorityError("authority token is stale (old epoch)")
+        if row["expires_at"] <= now:
+            raise FencedAuthorityError("authority lease expired")
+
+    def request_authority_handoff(
+        self,
+        run_id: str,
+        token: AuthorityToken,
+        target_agent_id: str,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        if not target_agent_id.strip() or not reason.strip():
+            raise ValueError("target_agent_id and reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_authority_tx(token, now)
+            if token.run_id != run_id:
+                raise FencedAuthorityError("authority token belongs to another Run")
+            active_merge = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM merge_queue
+                WHERE run_id = ? AND status = 'APPLYING'
+                """,
+                (run_id,),
+            ).fetchone()[0]
+            if active_merge > 0:
+                raise RuntimeError(
+                    "handoff rejected: an integration merge is in progress"
+                )
+            request_id = f"handoff-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                UPDATE authority_leases
+                SET handoff_state = 'REQUESTED', handoff_target_agent_id = ?,
+                    requested_at = ?
+                WHERE run_id = ? AND state = 'ACTIVE'
+                """,
+                (target_agent_id, now, run_id),
+            )
+            self._append_event(
+                run_id,
+                None,
+                None,
+                "authority.handoff_requested",
+                "ACTIVE",
+                "REQUESTED",
+                {"request_id": request_id, "target_agent_id": target_agent_id, "reason": reason},
+            )
+            self.connection.commit()
+            return {
+                "request_id": request_id,
+                "run_id": run_id,
+                "target_agent_id": target_agent_id,
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def accept_authority_handoff(
+        self, run_id: str, request_id: str, target_agent_id: str
+    ) -> None:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            updated = self.connection.execute(
+                """
+                UPDATE authority_leases
+                SET handoff_state = 'ACCEPTED'
+                WHERE run_id = ? AND state = 'ACTIVE'
+                  AND handoff_state = 'REQUESTED'
+                  AND handoff_target_agent_id = ?
+                """,
+                (run_id, target_agent_id),
+            ).rowcount
+            if updated == 0:
+                raise RuntimeError("no matching pending handoff request")
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def commit_authority_handoff(
+        self,
+        run_id: str,
+        request_id: str,
+        target_agent_id: str,
+        *,
+        lease_seconds: int = 300,
+    ) -> AuthorityToken:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            as_of = self._aware_datetime(None)
+            now = as_of.isoformat()
+            expires_at = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+            row = self.connection.execute(
+                """
+                SELECT * FROM authority_leases
+                WHERE run_id = ? AND state = 'ACTIVE'
+                  AND handoff_state = 'ACCEPTED'
+                  AND handoff_target_agent_id = ?
+                """,
+                (run_id, target_agent_id),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("no accepted handoff to commit")
+            epoch = int(row["epoch"]) + 1
+            role_id = str(row["role_id"])
+            scope = str(row["scope"])
+            self.connection.execute(
+                """
+                UPDATE authority_leases
+                SET owner_agent_id = ?, role_id = ?, scope = ?, epoch = ?,
+                    state = 'ACTIVE', acquired_at = ?, expires_at = ?,
+                    handoff_state = NULL, handoff_target_agent_id = NULL,
+                    ended_at = NULL, end_reason = NULL
+                WHERE run_id = ?
+                """,
+                (
+                    target_agent_id,
+                    role_id,
+                    scope,
+                    epoch,
+                    now,
+                    expires_at,
+                    run_id,
+                ),
+            )
+            self._append_event(
+                run_id,
+                None,
+                None,
+                "authority.handoff_committed",
+                str(row["epoch"]),
+                str(epoch),
+                {"owner_agent_id": target_agent_id, "role_id": role_id},
+            )
+            self.connection.commit()
+            return AuthorityToken(
+                run_id=run_id,
+                owner_agent_id=target_agent_id,
+                role_id=role_id,
+                epoch=epoch,
+                expires_at=expires_at,
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    # ---- Human Approval ----
+
+    def create_approval_request(
+        self,
+        run_id: str,
+        *,
+        task_id: str,
+        action_summary: str,
+        params: dict[str, Any],
+        requested_by: str,
+        scope: str,
+        single_use: bool = False,
+        expires_at: str | None = None,
+    ) -> str:
+        if not action_summary.strip() or not requested_by.strip():
+            raise ValueError("action_summary and requested_by must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            params_hash = hashlib.sha256(
+                json.dumps(params, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+            request_id = f"approval-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO approval_requests(
+                    request_id, run_id, task_id, action_summary, params_hash,
+                    requested_by, scope, single_use, status, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                """,
+                (
+                    request_id,
+                    run_id,
+                    task_id,
+                    action_summary,
+                    params_hash,
+                    requested_by,
+                    scope,
+                    1 if single_use else 0,
+                    expires_at,
+                    now,
+                ),
+            )
+            self._append_event(
+                run_id,
+                task_id,
+                None,
+                "approval.requested",
+                "PENDING",
+                "PENDING",
+                {"request_id": request_id, "action_summary": action_summary, "scope": scope},
+            )
+            self.connection.commit()
+            return request_id
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def decide_approval(
+        self,
+        request_id: str,
+        decision: str,
+        *,
+        decided_by: str,
+        comment: str | None = None,
+    ) -> None:
+        if decision not in {"APPROVED", "REJECTED"}:
+            raise ValueError(f"unsupported decision: {decision}")
+        if not decided_by.strip():
+            raise ValueError("decided_by must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            row = self.connection.execute(
+                "SELECT run_id, status FROM approval_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(request_id)
+            if row["status"] != "PENDING":
+                raise RuntimeError("approval request was already decided")
+            self.connection.execute(
+                """
+                UPDATE approval_requests
+                SET status = ?, decided_at = ?, decided_by = ?
+                WHERE request_id = ? AND status = 'PENDING'
+                """,
+                (decision, now, decided_by, request_id),
+            )
+            decision_id = f"decision-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO approval_decisions(
+                    decision_id, request_id, run_id, decision, decided_by,
+                    comment, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (decision_id, request_id, row["run_id"], decision, decided_by, comment, now),
+            )
+            self._append_event(
+                row["run_id"],
+                None,
+                None,
+                "approval.decided",
+                "PENDING",
+                decision,
+                {"request_id": request_id, "decided_by": decided_by, "comment": comment},
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    # ---- Hard Budget ----
+
+    def record_budget(
+        self,
+        run_id: str,
+        *,
+        max_run_seconds: int | None = None,
+        max_calls: int | None = None,
+        max_turns: int | None = None,
+        max_tasks: int | None = None,
+        max_cost_decimal: str | None = None,
+    ) -> None:
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            row = self.connection.execute(
+                "SELECT budget_id FROM budgets WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                self.connection.execute(
+                    """
+                    INSERT INTO budgets(
+                        budget_id, run_id, max_run_seconds, max_calls, max_turns,
+                        max_tasks, max_cost_decimal, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"budget-{uuid.uuid4().hex[:16]}",
+                        run_id,
+                        max_run_seconds,
+                        max_calls,
+                        max_turns,
+                        max_tasks,
+                        max_cost_decimal,
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                assignments = []
+                parameters: list[Any] = []
+                for column, value in (
+                    ("max_run_seconds", max_run_seconds),
+                    ("max_calls", max_calls),
+                    ("max_turns", max_turns),
+                    ("max_tasks", max_tasks),
+                    ("max_cost_decimal", max_cost_decimal),
+                ):
+                    if value is not None:
+                        assignments.append(f"{column} = ?")
+                        parameters.append(value)
+                parameters.append(now)
+                parameters.append(run_id)
+                self.connection.execute(
+                    f"UPDATE budgets SET {', '.join(assignments)}, updated_at = ? "
+                    "WHERE run_id = ?",
+                    parameters,
+                )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def budget_status(self, run_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            """
+            SELECT b.max_run_seconds, b.max_calls, b.max_turns, b.max_tasks,
+                   b.max_cost_decimal, r.created_at AS run_created_at
+            FROM budgets b JOIN runs r ON r.run_id = b.run_id
+            WHERE b.run_id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "run_id": run_id,
+                "exceeded": False,
+                "calls": None,
+                "tasks": None,
+                "run_seconds": None,
+            }
+        calls = self.connection.execute(
+            "SELECT COUNT(*) FROM backend_calls WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        tasks = self.connection.execute(
+            "SELECT COUNT(*) FROM tasks WHERE run_id = ?", (run_id,)
+        ).fetchone()[0]
+        try:
+            started = datetime.fromisoformat(row["run_created_at"])
+            run_seconds = max(
+                0, int((self._aware_datetime(None) - started).total_seconds())
+            )
+        except (ValueError, TypeError):
+            run_seconds = 0
+        exceeded = False
+        for usage, limit in (
+            (calls, row["max_calls"]),
+            (tasks, row["max_tasks"]),
+            (run_seconds, row["max_run_seconds"]),
+        ):
+            if limit is not None and usage >= int(limit):
+                exceeded = True
+        return {
+            "run_id": run_id,
+            "exceeded": exceeded,
+            "calls": int(calls),
+            "tasks": int(tasks),
+            "run_seconds": run_seconds,
+            "max_calls": row["max_calls"],
+            "max_tasks": row["max_tasks"],
+            "max_run_seconds": row["max_run_seconds"],
+            "max_turns": row["max_turns"],
+            "max_cost_decimal": row["max_cost_decimal"],
+        }
 
     def record_outbox_intent(
         self,
@@ -3930,7 +4464,7 @@ class SQLiteStateStore:
 
     def _migrate_schema(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 10:
+        if version > 11:
             raise RuntimeError(f"database schema version {version} is newer than supported")
         if version < 2:
             with self.connection:
@@ -3995,6 +4529,8 @@ class SQLiteStateStore:
             self._migrate_to_v9()
         if version < 10:
             self._migrate_to_v10()
+        if version < 11:
+            self._migrate_to_v11()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -4382,6 +4918,71 @@ class SQLiteStateStore:
                     resolved_at TEXT
                 );
                 PRAGMA user_version=10;
+                """
+            )
+
+    def _migrate_to_v11(self) -> None:
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS authority_leases (
+                    lease_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
+                    owner_agent_id TEXT NOT NULL,
+                    role_id TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'supervisor',
+                    epoch INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('ACTIVE', 'ENDED')),
+                    handoff_state TEXT CHECK(
+                        handoff_state IS NULL OR
+                        handoff_state IN ('REQUESTED', 'ACCEPTED')
+                    ),
+                    handoff_target_agent_id TEXT,
+                    requested_at TEXT,
+                    acquired_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    end_reason TEXT
+                );
+                CREATE TABLE IF NOT EXISTS approval_requests (
+                    request_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT,
+                    action_summary TEXT NOT NULL,
+                    params_hash TEXT NOT NULL,
+                    requested_by TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    single_use INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'USED'
+                    )),
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL,
+                    decided_at TEXT,
+                    decided_by TEXT
+                );
+                CREATE TABLE IF NOT EXISTS approval_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL REFERENCES approval_requests(request_id),
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    decision TEXT NOT NULL CHECK(decision IN ('APPROVED', 'REJECTED')),
+                    decided_by TEXT NOT NULL,
+                    comment TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS budgets (
+                    budget_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL UNIQUE REFERENCES runs(run_id),
+                    max_run_seconds INTEGER,
+                    max_calls INTEGER,
+                    max_turns INTEGER,
+                    max_tasks INTEGER,
+                    max_cost_decimal TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                PRAGMA user_version=11;
                 """
             )
 
