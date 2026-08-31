@@ -101,7 +101,7 @@
    - `budgets` + `budget_status`（时间/调用数/turn/任务数硬预算），`claim_ready_dispatch` 派发前检查超限停派。
    - CLI `approvals/approve/reject` 人工审批命令（端到端验证通过）。
 
-当前验证：147 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
+当前验证：150 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
 ## 3. 阶段 2 尚未完成：WorkBuddy 应按此顺序继续
 
