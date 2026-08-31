@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "team_id": "cross-harness-poc",
+  "bootstrap_supervisor": "supervisor",
+  "roles": [
+    {
+      "role_id": "supervisor",
+      "version": 1,
+      "title": "Supervisor and Reviewer",
+      "required_capabilities": ["plan", "review"]
+    },
+    {
+      "role_id": "worker",
+      "version": 1,
+      "title": "Implementation Worker",
+      "required_capabilities": ["read", "write", "test"]
+    }
+  ],
+  "agent_pools": [
+    {
+      "pool_id": "codex-supervisor",
+      "backend": "codex",
+      "role_id": "supervisor",
+      "count": 1,
+      "max_count": 1
+    },
+    {
+      "pool_id": "codebuddy-workers",
+      "backend": "codebuddy",
+      "role_id": "worker",
+      "count": 2,
+      "max_count": 2
+    }
+  ]
+}

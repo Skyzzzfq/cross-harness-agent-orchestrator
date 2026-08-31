@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cross-harness-agent-hub"
+version = "0.1.0"
+description = "A local orchestrator for Codex and CodeBuddy agent teams"
+requires-python = ">=3.10"
+dependencies = [
+  "openai-codex==0.147.0",
+  "codebuddy-agent-sdk==0.3.248",
+]
+
+[project.scripts]
+agent-hub = "orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
+
