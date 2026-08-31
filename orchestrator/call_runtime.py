@@ -28,7 +28,9 @@ async def execute_adapter_call(
             reason="adapter-started",
             controller=controller,
         )
-        terminal = await running.wait()
+        terminal = await _wait_for_terminal_with_cancel(
+            running, store, request.call_id
+        )
     else:
         terminal = initial
         if terminal.backend_invoked:
@@ -50,6 +52,29 @@ async def execute_adapter_call(
         controller=controller,
     )
     return terminal
+
+
+async def _wait_for_terminal_with_cancel(
+    running: object,
+    store: SQLiteStateStore,
+    call_id: str,
+) -> CallSnapshot:
+    """Wait for a running call, interrupting it when a cancel is requested.
+
+    The persisted ``cancel_requested`` flag is polled so that a concurrent
+    ``request_cancel_task`` (from another connection or a CLI operator) can
+    interrupt an in-flight call well inside the 10-second cancel SLA.
+    """
+    cancel_sent = False
+    while True:
+        if not cancel_sent and store.backend_call_cancel_requested(call_id):
+            snapshot = await running.cancel(reason="task-cancelled")
+            if snapshot.state.is_terminal:
+                return snapshot
+            cancel_sent = True
+        terminal = await running.wait(timeout_seconds=0.05)
+        if terminal.state.is_terminal:
+            return terminal
 
 
 def recover_starting_calls(

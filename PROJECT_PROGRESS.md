@@ -12,10 +12,10 @@
 |---|---|---|---|
 | 阶段 0：可行性闸门 | 已完成（GO） | `SPIKE_REPORT.md`、`ACCOUNT_BOUNDARIES.md` | 是 |
 | 阶段 1：PoC 行走骨架 | 已完成（PASS） | `STAGE1_REPORT.md`、真实三连跑历史 | 是 |
-| 阶段 2：MVP | 进行中 | `STAGE2_REPORT.md`、101 项测试、schema v8 | 否，退出条件未全部满足 |
+| 阶段 2：MVP | 进行中 | `STAGE2_REPORT.md`、116 项测试、schema v9 | 否，退出条件未全部满足 |
 | 阶段 3：Beta | 未开始 | 无 | 否，必须先完成阶段 2 |
 
-当前实际状态库：schema v8，10 Run、20 Task、29 Attempt、293 Event，`integrity_check=ok`、`foreign_key_check=0`。升级前备份位于 `.agent-hub/state/agent-hub.db.v6-backup-20260831-stage2`；`.agent-hub/` 是本地运行证据，不进入 Git。
+当前实际状态库：schema v9，10 Run、20 Task、29 Attempt、293 Event，`integrity_check=ok`、`foreign_key_check=0`。升级前备份位于 `.agent-hub/state/agent-hub.db.v8-backup-20260831-stage2`；`.agent-hub/` 是本地运行证据，不进入 Git。
 
 ## 2. 已完成内容
 
@@ -75,7 +75,14 @@
    - 到期任务按优先级派发；未来高优先级任务不阻塞当前任务。
    - 指数退避并按上限封顶。
 
-当前验证：101 项单元、契约和 Fake 集成测试通过；37 个 Python 文件无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
+6. Pause / Resume / Cancel 与后台控制循环
+   - schema v9：Run 级 `control_state` + Task 级 `paused`，一个调度周期内零新派发，Resume 不绕过 DAG。
+   - `request_cancel_task/run`：持久 `CANCEL_REQUESTED`，`starting` 调用零副作用直接取消，`running` 调用 50ms 内发出 interrupt。
+   - 取消收敛：任何终态（含自然结束的 SUCCEEDED）收敛到 `CANCELLED`，SUCCEEDED 记为 late，绝不进入审核或集成。
+   - 后台常驻循环（`serve`）：controller 常驻续租、失权退出、接管恢复、明确启停；过期租约 90 秒内回收已验证。
+   - CLI 新增 `serve / pause / resume / cancel` 命令；环境适配 git 2.55.0 worktree 斜杠分支名回归（`poc/` → `poc-`）。
+
+当前验证：116 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
 ## 3. 阶段 2 尚未完成：WorkBuddy 应按此顺序继续
 
@@ -83,14 +90,14 @@
 
 ### S2-06：完整 Pause / Resume / Cancel 与后台控制循环
 
-- [ ] Run/Task 级 Pause：一个调度周期内停止新派发。
-- [ ] Resume：只恢复允许继续的 READY/PENDING Task，不绕过 DAG。
-- [ ] Cancel：持久 `CANCEL_REQUESTED`，10 秒内向可中断 Adapter 发出 interrupt。
-- [ ] 无法强制中止的调用允许自然结束，但结果只能记为 late，不能进入审核或集成。
-- [ ] 后台 Scheduler/Reconciler 有明确启停、controller 常驻续租、失权退出和接管恢复。
-- [ ] 证明过期租约在 90 秒内回收。
+- [x] Run/Task 级 Pause：一个调度周期内停止新派发。
+- [x] Resume：只恢复允许继续的 READY/PENDING Task，不绕过 DAG。
+- [x] Cancel：持久 `CANCEL_REQUESTED`，10 秒内向可中断 Adapter 发出 interrupt（实测 50ms 轮询）。
+- [x] 无法强制中止的调用允许自然结束，但结果只能记为 late，不能进入审核或集成。
+- [x] 后台 Scheduler/Reconciler 有明确启停、controller 常驻续租、失权退出和接管恢复。
+- [x] 证明过期租约在 90 秒内回收。
 
-验收：Fake 覆盖取消前、启动中、运行中、完成竞态、重复取消、失权接管和后台进程重启。
+验收：Fake 覆盖取消前、启动中、运行中、完成竞态、重复取消、失权接管和后台进程重启（15 项新测试）。
 
 ### S2-07：真实 Codex / 中国站 CodeBuddy 接入统一 Scheduler
 

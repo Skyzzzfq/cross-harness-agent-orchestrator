@@ -854,6 +854,7 @@ class SQLiteStateStore:
                        s.session_ref_id, s.provider_session_id
                 FROM tasks t
                 JOIN task_dispatch_specs d ON d.task_id = t.task_id
+                JOIN runs r ON r.run_id = t.run_id
                 JOIN role_bindings b
                   ON b.run_id = t.run_id
                  AND b.role_id = d.required_role_id
@@ -869,6 +870,8 @@ class SQLiteStateStore:
                  AND s.state = 'IDLE'
                 WHERE t.run_id = ? AND t.state = 'READY'
                   AND d.available_at <= ?
+                  AND r.control_state = 'RUNNING'
+                  AND d.paused = 0
                 ORDER BY d.priority DESC, t.created_at, t.task_id,
                          a.created_at, a.agent_id
                 LIMIT 1
@@ -1013,6 +1016,437 @@ class SQLiteStateStore:
         except BaseException:
             self.connection.rollback()
             raise
+
+    def pause_run(
+        self, run_id: str, controller: ControllerToken, *, reason: str
+    ) -> None:
+        self._set_run_control_state(run_id, "PAUSED", controller, reason, "run.paused")
+
+    def resume_run(
+        self, run_id: str, controller: ControllerToken, *, reason: str
+    ) -> None:
+        self._set_run_control_state(
+            run_id, "RUNNING", controller, reason, "run.resumed"
+        )
+
+    def _set_run_control_state(
+        self,
+        run_id: str,
+        target: str,
+        controller: ControllerToken,
+        reason: str,
+        event_kind: str,
+    ) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(
+                controller, self._aware_datetime(None).isoformat()
+            )
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            row = self.connection.execute(
+                "SELECT control_state FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            current = str(row["control_state"])
+            if current == target:
+                self.connection.commit()
+                return
+            now = utc_now()
+            self.connection.execute(
+                "UPDATE runs SET control_state = ? WHERE run_id = ?",
+                (target, run_id),
+            )
+            self._append_event(
+                run_id, None, None, event_kind, current, target, {"reason": reason}
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def pause_task(
+        self, task_id: str, controller: ControllerToken, *, reason: str
+    ) -> None:
+        self._set_task_paused(task_id, 1, controller, reason, "task.paused")
+
+    def resume_task(
+        self, task_id: str, controller: ControllerToken, *, reason: str
+    ) -> None:
+        self._set_task_paused(task_id, 0, controller, reason, "task.resumed")
+
+    def _set_task_paused(
+        self,
+        task_id: str,
+        paused: int,
+        controller: ControllerToken,
+        reason: str,
+        event_kind: str,
+    ) -> None:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(
+                controller, self._aware_datetime(None).isoformat()
+            )
+            row = self.connection.execute(
+                """
+                SELECT t.run_id, d.paused
+                FROM tasks t
+                JOIN task_dispatch_specs d ON d.task_id = t.task_id
+                WHERE t.task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("task belongs to another Run")
+            current = int(row["paused"])
+            if current == paused:
+                self.connection.commit()
+                return
+            now = utc_now()
+            self.connection.execute(
+                "UPDATE task_dispatch_specs SET paused = ? WHERE task_id = ?",
+                (paused, task_id),
+            )
+            self._append_event(
+                row["run_id"],
+                task_id,
+                None,
+                event_kind,
+                str(current),
+                str(paused),
+                {"reason": reason},
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def request_cancel_task(
+        self, task_id: str, controller: ControllerToken, *, reason: str
+    ) -> str:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                "SELECT run_id, state FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("task belongs to another Run")
+            current = TaskState(row["state"])
+            run_id = str(row["run_id"])
+            if current in {
+                TaskState.COMPLETED,
+                TaskState.FAILED,
+                TaskState.CANCELLED,
+            }:
+                self.connection.commit()
+                return "noop"
+            if current == TaskState.CANCEL_REQUESTED:
+                self._transition_task_tx(
+                    task_id, TaskState.CANCELLED, reason, now
+                )
+                self._reconcile_task_graph_tx(run_id, now)
+                self.connection.commit()
+                return "cancelled"
+            if current in {TaskState.PENDING, TaskState.READY}:
+                self._transition_task_tx(
+                    task_id, TaskState.CANCEL_REQUESTED, reason, now
+                )
+                self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+                self._reconcile_task_graph_tx(run_id, now)
+                self.connection.commit()
+                return "cancelled"
+            if current == TaskState.REVIEW:
+                self._transition_task_tx(
+                    task_id, TaskState.CANCEL_REQUESTED, reason, now
+                )
+                self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+                self._reconcile_task_graph_tx(run_id, now)
+                self.connection.commit()
+                return "cancelled"
+            if current == TaskState.ACTIVE:
+                disposition = self._request_cancel_active_task_tx(
+                    run_id, task_id, reason, now
+                )
+                self.connection.commit()
+                return disposition
+            self.connection.commit()
+            return "noop"
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def request_cancel_run(
+        self, run_id: str, controller: ControllerToken, *, reason: str
+    ) -> dict[str, Any]:
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            if controller.run_id != run_id:
+                raise FencedControllerError("controller token belongs to another Run")
+            rows = self.connection.execute(
+                """
+                SELECT task_id FROM tasks
+                WHERE run_id = ? AND state NOT IN (
+                    'COMPLETED', 'FAILED', 'CANCELLED'
+                )
+                ORDER BY created_at, task_id
+                """,
+                (run_id,),
+            ).fetchall()
+            dispositions: dict[str, str] = {}
+            for row in rows:
+                task_id = str(row["task_id"])
+                dispositions[task_id] = self._cancel_task_in_tx(
+                    run_id, task_id, reason, now
+                )
+            self._reconcile_task_graph_tx(run_id, now)
+            self.connection.commit()
+            return {"dispositions": dispositions}
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def _cancel_task_in_tx(
+        self, run_id: str, task_id: str, reason: str, now: str
+    ) -> str:
+        row = self.connection.execute(
+            "SELECT state FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        current = TaskState(row["state"])
+        if current in {
+            TaskState.COMPLETED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }:
+            return "noop"
+        if current == TaskState.CANCEL_REQUESTED:
+            self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+            return "cancelled"
+        if current in {TaskState.PENDING, TaskState.READY, TaskState.REVIEW}:
+            self._transition_task_tx(task_id, TaskState.CANCEL_REQUESTED, reason, now)
+            self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+            return "cancelled"
+        if current == TaskState.ACTIVE:
+            return self._request_cancel_active_task_tx(
+                run_id, task_id, reason, now
+            )
+        return "noop"
+
+    def _request_cancel_active_task_tx(
+        self, run_id: str, task_id: str, reason: str, now: str
+    ) -> str:
+        self._transition_task_tx(task_id, TaskState.CANCEL_REQUESTED, reason, now)
+        attempts = self.connection.execute(
+            """
+            SELECT attempt_id, generation FROM attempts
+            WHERE task_id = ? AND state IN ('ASSIGNED', 'RUNNING')
+            ORDER BY attempt_number DESC
+            """,
+            (task_id,),
+        ).fetchall()
+        any_running_call = False
+        for attempt in attempts:
+            call = self.connection.execute(
+                """
+                SELECT call_id, state FROM backend_calls
+                WHERE attempt_id = ? AND state IN (
+                    'starting', 'running', 'cancel_requested'
+                )
+                """,
+                (attempt["attempt_id"],),
+            ).fetchone()
+            if call is None:
+                continue
+            if call["state"] == "starting":
+                self.connection.execute(
+                    """
+                    UPDATE backend_calls
+                    SET state = 'cancelled', finished_at = ?,
+                        disposition = 'cancelled', settled_at = ?
+                    WHERE call_id = ? AND state = 'starting'
+                    """,
+                    (now, now, call["call_id"]),
+                )
+                self._transition_attempt_tx(
+                    attempt["attempt_id"],
+                    AttemptState.CANCEL_REQUESTED,
+                    reason,
+                    now,
+                )
+                self._transition_attempt_tx(
+                    attempt["attempt_id"], AttemptState.CANCELLED, reason, now
+                )
+                self._release_attempt_resources_tx(
+                    attempt["attempt_id"],
+                    int(attempt["generation"]),
+                    task_id,
+                    reason,
+                    now,
+                )
+            elif call["state"] == "running":
+                self.connection.execute(
+                    """
+                    UPDATE backend_calls
+                    SET state = 'cancel_requested', cancel_requested_at = ?
+                    WHERE call_id = ? AND state = 'running'
+                    """,
+                    (now, call["call_id"]),
+                )
+                self._transition_attempt_tx(
+                    attempt["attempt_id"],
+                    AttemptState.CANCEL_REQUESTED,
+                    reason,
+                    now,
+                )
+                any_running_call = True
+        if not any_running_call:
+            self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+            self._reconcile_task_graph_tx(run_id, now)
+            return "cancelled"
+        return "cancel_requested"
+
+    def _release_attempt_resources_tx(
+        self,
+        attempt_id: str,
+        generation: int,
+        task_id: str,
+        reason: str,
+        now: str,
+    ) -> None:
+        call = self.connection.execute(
+            """
+            SELECT agent_id, session_ref_id FROM backend_calls
+            WHERE attempt_id = ?
+            ORDER BY requested_at DESC LIMIT 1
+            """,
+            (attempt_id,),
+        ).fetchone()
+        self.connection.execute(
+            """
+            UPDATE assignment_leases
+            SET state = 'RELEASED', closed_at = ?, close_reason = ?
+            WHERE attempt_id = ? AND generation = ? AND state = 'ACTIVE'
+            """,
+            (now, reason, attempt_id, generation),
+        )
+        if call is not None:
+            self.connection.execute(
+                """
+                UPDATE agent_instances
+                SET status = CASE WHEN status = 'BUSY' THEN 'IDLE' ELSE status END,
+                    current_task_id = NULL, updated_at = ?
+                WHERE agent_id = ? AND current_task_id = ?
+                  AND status IN ('BUSY', 'DRAINING')
+                """,
+                (now, call["agent_id"], task_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE backend_sessions SET state = 'IDLE', updated_at = ?
+                WHERE session_ref_id = ? AND state = 'ACTIVE'
+                """,
+                (now, call["session_ref_id"]),
+            )
+
+    def _transition_task_tx(
+        self, task_id: str, target: TaskState, reason: str, now: str
+    ) -> None:
+        row = self.connection.execute(
+            "SELECT run_id, state FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        current = TaskState(row["state"])
+        ensure_task_transition(current, target)
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET state = ?, terminal_reason = ?, version = version + 1, updated_at = ?
+            WHERE task_id = ?
+            """,
+            (
+                target.value,
+                reason if target == TaskState.CANCELLED else None,
+                now,
+                task_id,
+            ),
+        )
+        self._append_event(
+            row["run_id"],
+            task_id,
+            None,
+            "task.transitioned",
+            current.value,
+            target.value,
+            {"reason": reason},
+        )
+
+    def _transition_attempt_tx(
+        self, attempt_id: str, target: AttemptState, reason: str, now: str
+    ) -> None:
+        row = self.connection.execute(
+            """
+            SELECT a.state, a.task_id, t.run_id
+            FROM attempts a JOIN tasks t ON t.task_id = a.task_id
+            WHERE a.attempt_id = ?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(attempt_id)
+        current = AttemptState(row["state"])
+        ensure_attempt_transition(current, target)
+        terminal = target in {
+            AttemptState.CANCELLED,
+            AttemptState.FAILED,
+            AttemptState.STALE,
+        }
+        self.connection.execute(
+            """
+            UPDATE attempts
+            SET state = ?, finished_at = ?, terminal_reason = ?, updated_at = ?
+            WHERE attempt_id = ?
+            """,
+            (
+                target.value,
+                now if terminal else None,
+                reason if terminal else None,
+                now,
+                attempt_id,
+            ),
+        )
+        self._append_event(
+            row["run_id"],
+            row["task_id"],
+            attempt_id,
+            "attempt.transitioned",
+            current.value,
+            target.value,
+            {"reason": reason},
+        )
+
+    def backend_call_cancel_requested(self, call_id: str) -> bool:
+        row = self.connection.execute(
+            "SELECT state FROM backend_calls WHERE call_id = ?", (call_id,)
+        ).fetchone()
+        return row is not None and row["state"] == "cancel_requested"
 
     def mark_backend_call_running(
         self,
@@ -1168,11 +1602,23 @@ class SQLiteStateStore:
                 and row["expires_at"] > now
             )
             late_result = snapshot.state == CallState.SUCCEEDED and not current_dispatch
+            task_cancel_requested = (
+                row["task_state"] == TaskState.CANCEL_REQUESTED.value
+            )
+            attempt_cancel_requested = (
+                row["attempt_state"] == AttemptState.CANCEL_REQUESTED.value
+            )
+            cancel_convergence = task_cancel_requested and attempt_cancel_requested
             attempt_target: AttemptState | None = None
             task_target: TaskState | None = None
             retry_delay: int | None = None
             retry_available_at: str | None = None
-            if late_result:
+            if cancel_convergence:
+                disposition = "cancelled"
+                late_result = snapshot.state == CallState.SUCCEEDED
+                attempt_target = AttemptState.CANCELLED
+                task_target = TaskState.CANCELLED
+            elif late_result:
                 disposition = "late"
             elif snapshot.state == CallState.SUCCEEDED and current_dispatch:
                 disposition = "submitted"
@@ -3013,7 +3459,7 @@ class SQLiteStateStore:
 
     def _migrate_schema(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 8:
+        if version > 9:
             raise RuntimeError(f"database schema version {version} is newer than supported")
         if version < 2:
             with self.connection:
@@ -3074,6 +3520,8 @@ class SQLiteStateStore:
             self._migrate_to_v7()
         if version < 8:
             self._migrate_to_v8()
+        if version < 9:
+            self._migrate_to_v9()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -3388,6 +3836,30 @@ class SQLiteStateStore:
                         f"ALTER TABLE task_dispatch_specs ADD COLUMN {name} {declaration}"
                     )
             self.connection.execute("PRAGMA user_version=8")
+
+    def _migrate_to_v9(self) -> None:
+        with self.connection:
+            run_columns = {
+                row["name"]
+                for row in self.connection.execute("PRAGMA table_info(runs)")
+            }
+            if "control_state" not in run_columns:
+                self.connection.execute(
+                    "ALTER TABLE runs ADD COLUMN control_state "
+                    "TEXT NOT NULL DEFAULT 'RUNNING'"
+                )
+            dispatch_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(task_dispatch_specs)"
+                )
+            }
+            if "paused" not in dispatch_columns:
+                self.connection.execute(
+                    "ALTER TABLE task_dispatch_specs ADD COLUMN paused "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            self.connection.execute("PRAGMA user_version=9")
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(

@@ -2,7 +2,7 @@
 
 更新时间：2026-08-31
 
-状态：**进行中。前五切片“状态 Reconciler”“Agent Runtime / Fake Pool”“可恢复 Fake Scheduler 闭环”“Run Controller fencing”和“Task DAG / 优先级退避”已完成，尚未满足阶段 2 全部退出条件。**
+状态：**进行中。前六切片“状态 Reconciler”“Agent Runtime / Fake Pool”“可恢复 Fake Scheduler 闭环”“Run Controller fencing”“Task DAG / 优先级退避”和“Pause / Resume / Cancel 与后台控制循环”已完成，尚未满足阶段 2 全部退出条件。**
 
 ## 本切片范围
 
@@ -70,15 +70,27 @@
 - retryable failure、超时和丢失 Worker 统一按 `min(max, base×2^(attempt_count-1))` 更新 `available_at`；同一 tick 不自旋重试，测试已验证 `2s→3s→3s` 封顶。
 - 实际运行库已从 schema v6 升级至 v8；升级前备份为 `.agent-hub/state/agent-hub.db.v6-backup-20260831-stage2`。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`foreign_key_check=0`、`integrity_check=ok`。
 - 实际历史库中的 `task_dependencies` 和 `run_controller_leases` 当前均为 0；本切片行为证据来自隔离临时数据库中的单元、并发和迁移测试，不把历史 Run 伪装成新架构实跑记录。
-- 当前 101 项单元、契约和 Fake 集成测试全部通过；37 个 Python 文件通过无落盘编译检查，凭据特征扫描为 0。
+- 第五切片结束时共 101 项单元、契约和 Fake 集成测试全部通过；37 个 Python 文件通过无落盘编译检查，凭据特征扫描为 0。
+
+## 第六切片：Pause / Resume / Cancel 与后台控制循环
+
+- schema v9 增加 Run 级 `runs.control_state`（`RUNNING`/`PAUSED`）和 Task 级 `task_dispatch_specs.paused`，不引入新的 TaskState 状态、不破坏既有状态机。
+- `pause_run/resume_run`、`pause_task/resume_task` 全部走 `BEGIN IMMEDIATE` + controller fencing + 审计事件；重复 pause/resume 幂等（同目标值直接返回，不重复写事件）。
+- `claim_ready_dispatch()` 在事务内新增过滤：Run 为 `PAUSED` 或 Task dispatch spec 被 paused 的任务不派发，Pause 生效后一个调度周期内零新派发；Resume 只恢复原 READY/PENDING 任务，不绕过 DAG。
+- `request_cancel_task()` 单事务按当前状态分派：PENDING/READY/REVIEW 直接 `CANCEL_REQUESTED → CANCELLED` 并级联 DAG 下游；ACTIVE 时持久 `CANCEL_REQUESTED`——`starting`（未 invoke）的调用零副作用直接取消，`running`（已 invoke）的调用标记 `cancel_requested` 并等待 interrupt；终态幂等 `noop`。`request_cancel_run()` 遍历 Run 内所有非终态 Task 同事务取消。
+- `call_runtime.execute_adapter_call()` 在等待期间轮询持久 cancel 标志，发现后对 `RunningCall.cancel()` 发出 interrupt（50ms 轮询，远小于 10 秒 SLA）；confirmed 取消立即收敛，unconfirmed/unsupported 取消允许自然结束。
+- `finish_backend_call()` 新增取消收敛分支：Task/Attempt 均为 `CANCEL_REQUESTED` 时，任何终态（含自然结束的 SUCCEEDED）都收敛到 `CANCELLED` 并释放 Lease/Agent/Session；SUCCEEDED 额外记为 `late_result=1`，绝不进入 REVIEW/INTEGRATION。
+- 新增 `orchestrator/serve.py` 后台常驻循环：持有 Run controller 并后台续租（租期 1/3 间隔），每周期执行 reconcile_once → scheduler_tick → pool reconcile；续租遇 `FencedControllerError` 返回 `lost-controller` 并释放控制权；`stop_event`/`max_ticks` 明确停止，finally 释放 controller；重启后由 `recover_starting_calls` 接管恢复。
+- CLI 新增 `serve`（`--run --interval --lease --max-ticks`）、`pause`、`resume`、`cancel`（`--run`/`--task`）子命令；控制命令采用 acquire → 操作 → release 模式，另一实例持有时返回明确 `busy`。
+- 实际运行库已从 schema v8 升级至 v9；升级前备份为 `.agent-hub/state/agent-hub.db.v8-backup-20260831-stage2`。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=9`、`foreign_key_check=0`、`integrity_check=ok`；`runs.control_state` 与 `task_dispatch_specs.paused` 列已添加，历史 Run 默认 `RUNNING`/`paused=0`。
+- 第六切片结束时共 116 项单元、契约和 Fake 集成测试全部通过（新增 15 项覆盖取消前、启动中、运行中 interrupt、完成竞态、重复取消、失权接管、Pause/Resume、Run 级取消、后台循环启停与 90 秒内过期租约回收）；无落盘编译通过，凭据特征扫描为 0。
+- 环境适配：git 2.55.0 的 `worktree add -b` 对带斜杠分支名回归（`poc/worker` 报 `invalid reference`），`git_manager.py` 分支前缀改为 `poc-`（语义不变，阶段 1 测试不依赖分支名），基线恢复全绿后本切片才继续。
 
 ## 明确未完成
 
-- 还没有后台周期 Reconciler，也未证明过期租约 90 秒内自动回收。
-- Agent Pool 和 Scheduler 当前仍是显式单次调用；已有 Run 级 controller lease / epoch fencing 和 tick 期间自动续租，但还没有后台周期调度及长期存活 Orchestrator 的接管演练。
-- 已有 Task DAG、依赖解除、优先级和退避；还没有完整 Pause/Resume/Cancel，当前 Drain 只覆盖 Pool 缩容与孤儿调用隔离路径。
-- 还没有真实 Codex / CodeBuddy Adapter 接入统一 Scheduler；当前闭环只使用确定性 Fake Adapter。
+- 已有后台周期循环与过期租约回收（90 秒内），但还没有真实 Codex / CodeBuddy Adapter 接入统一 Scheduler；当前闭环只使用确定性 Fake Adapter。
 - 还没有持久 Merge Queue / Outbox、进程重启后的 Git 对账和“不重复 merge”证明。
-- 还没有预算门禁、人工审批命令和业务层 supervisor handoff。
+- 还没有预算门禁、人工审批命令和业务层 supervisor handoff（业务 `AuthorityLease` 未实现，不与 Run Controller lease 混淆）。
+- 还没有正式的状态页 / 时间线 / 成本视图；CLI 控制命令已可人工执行。
 
-下一切片应实现完整 Pause/Resume/Cancel，再启动有明确停止条件的后台周期循环和常驻 controller 管理；随后把已验证的 Codex / CodeBuddy PoC 调用适配到统一 Scheduler。
+下一切片应把已验证的 Codex / CodeBuddy PoC 调用适配到统一 Scheduler（S2-07），随后实现写范围串行化与持久 Merge Queue / Outbox（S2-08）。

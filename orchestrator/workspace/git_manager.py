@@ -165,7 +165,7 @@ class GitWorkspaceManager:
             "worktree",
             "add",
             "-b",
-            f"poc/{name}",
+            f"poc-{name}",
             str(target),
             base_commit,
         )
