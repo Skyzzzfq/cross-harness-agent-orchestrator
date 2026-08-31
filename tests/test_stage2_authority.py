@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 
 from orchestrator.core.models import TaskState
+from orchestrator.agent_pool import reconcile_pool_once
+from orchestrator.core.config import AgentPoolSpec
 from orchestrator.storage.sqlite_store import (
     FencedAuthorityError,
     SQLiteStateStore,
@@ -149,6 +151,128 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
         exceeded = self.store.budget_status("run-1")
         self.assertTrue(exceeded["exceeded"])
         self.assertEqual(exceeded["tasks"], 3)
+
+
+class BudgetDispatchTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
+        self.store.create_run("run-1", "team-1")
+        reconcile_pool_once(
+            self.store,
+            "run-1",
+            AgentPoolSpec(
+                pool_id="fake-workers",
+                backend="fake",
+                role_id="worker",
+                count=1,
+                max_count=1,
+                model="fake-v1",
+            ),
+        )
+        self.store.create_task("run-1", "task-1")
+        self.store.transition_task("task-1", TaskState.READY, reason="ready")
+
+    async def asyncTearDown(self) -> None:
+        self.store.close()
+        self.temp.cleanup()
+
+    def _controller(self) -> object:
+        return self.store.acquire_run_controller("run-1", "op", lease_seconds=60)
+
+    async def test_claim_stops_when_budget_exceeded(self) -> None:
+        token = self._controller()
+        self.store.record_budget("run-1", max_tasks=0)
+        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        self.assertIsNone(claim)
+        # 提高预算后恢复派发
+        self.store.record_budget("run-1", max_tasks=10)
+        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        self.assertIsNotNone(claim)
+
+    async def test_claim_normal_without_budget(self) -> None:
+        token = self._controller()
+        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        self.assertIsNotNone(claim)
+
+
+class ReviewLayerTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
+        self.store.create_run("run-1", "team-1")
+        self.store.create_task("run-1", "task-1")
+
+    async def asyncTearDown(self) -> None:
+        self.store.close()
+        self.temp.cleanup()
+
+    def _authority(self) -> object:
+        return self.store.acquire_authority("run-1", "codex-supervisor-01", "supervisor")
+
+    async def test_record_review_decision_three_layers(self) -> None:
+        authority = self._authority()
+        self.store.record_review_decision(
+            "run-1", "task-1", attempt_id="attempt-1", layer="deterministic",
+            decision="PASS", decided_by="verify-script", detail={"tests": 12},
+            authority=authority,
+        )
+        self.store.record_review_decision(
+            "run-1", "task-1", attempt_id="attempt-1", layer="model",
+            decision="PASS", decided_by="codex-reviewer-01", detail={},
+            authority=authority,
+        )
+        self.store.record_review_decision(
+            "run-1", "task-1", attempt_id="attempt-1", layer="human",
+            decision="APPROVED", decided_by="human-admin", detail={},
+            authority=authority,
+        )
+        rows = self.store.connection.execute(
+            "SELECT layer, decision FROM review_decisions WHERE task_id='task-1'"
+        ).fetchall()
+        self.assertEqual(len(rows), 3)
+        layers = {row["layer"] for row in rows}
+        self.assertEqual(layers, {"deterministic", "model", "human"})
+
+    async def test_review_decision_fenced_by_stale_authority(self) -> None:
+        authority = self._authority()
+        second = self.store.acquire_authority("run-1", "cb-supervisor-01", "supervisor")
+        with self.assertRaises(Exception):
+            self.store.record_review_decision(
+                "run-1", "task-1", attempt_id="attempt-1", layer="human",
+                decision="APPROVED", decided_by="admin", detail={},
+                authority=authority,
+            )
+
+
+class ApprovalListTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
+        self.store.create_run("run-1", "team-1")
+        self.store.create_task("run-1", "task-1")
+
+    async def asyncTearDown(self) -> None:
+        self.store.close()
+        self.temp.cleanup()
+
+    def _authority(self) -> object:
+        return self.store.acquire_authority("run-1", "codex-supervisor-01", "supervisor")
+
+    async def test_list_pending_approval_requests(self) -> None:
+        authority = self._authority()
+        self.store.create_approval_request(
+            "run-1", task_id="task-1", action_summary="deploy",
+            params={}, requested_by="supervisor", scope="deploy", single_use=True,
+        )
+        pending = self.store.list_approval_requests("run-1", status="PENDING")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["action_summary"], "deploy")
+        self.store.decide_approval(
+            pending[0]["request_id"], "APPROVED", decided_by="human-admin"
+        )
+        remaining = self.store.list_approval_requests("run-1", status="PENDING")
+        self.assertEqual(len(remaining), 0)
 
 
 if __name__ == "__main__":

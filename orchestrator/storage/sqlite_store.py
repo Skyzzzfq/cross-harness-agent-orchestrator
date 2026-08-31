@@ -850,6 +850,11 @@ class SQLiteStateStore:
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self._ensure_controller_tx(controller, now_value)
+            budget = self.budget_status(run_id)
+            if budget.get("exceeded"):
+                # 硬预算达到上限：零新增调用，停止派发。
+                self.connection.commit()
+                return None
             candidates = self.connection.execute(
                 """
                 SELECT t.task_id, t.run_id, t.access_mode, t.write_scope_json,
@@ -2207,6 +2212,93 @@ class SQLiteStateStore:
                 {"request_id": request_id, "decided_by": decided_by, "comment": comment},
             )
             self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def list_approval_requests(
+        self, run_id: str, *, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        if status is not None:
+            rows = self.connection.execute(
+                """
+                SELECT request_id, run_id, task_id, action_summary, scope,
+                       status, single_use, expires_at, created_at
+                FROM approval_requests
+                WHERE run_id = ? AND status = ?
+                ORDER BY created_at, request_id
+                """,
+                (run_id, status),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT request_id, run_id, task_id, action_summary, scope,
+                       status, single_use, expires_at, created_at
+                FROM approval_requests
+                WHERE run_id = ?
+                ORDER BY created_at, request_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_review_decision(
+        self,
+        run_id: str,
+        task_id: str,
+        *,
+        attempt_id: str | None,
+        layer: str,
+        decision: str,
+        decided_by: str,
+        detail: dict[str, Any],
+        authority: AuthorityToken,
+    ) -> str:
+        if layer not in {"deterministic", "model", "human"}:
+            raise ValueError(f"unsupported review layer: {layer}")
+        if decision not in {"PASS", "REWORK", "BLOCKED", "APPROVED", "REJECTED"}:
+            raise ValueError(f"unsupported review decision: {decision}")
+        if not decided_by.strip():
+            raise ValueError("decided_by must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_authority_tx(authority, now)
+            if authority.run_id != run_id:
+                raise FencedAuthorityError("authority token belongs to another Run")
+            decision_id = f"review-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO review_decisions(
+                    decision_id, run_id, task_id, attempt_id, layer, decision,
+                    detail_json, decided_by, authority_epoch, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision_id,
+                    run_id,
+                    task_id,
+                    attempt_id,
+                    layer,
+                    decision,
+                    json.dumps(detail),
+                    decided_by,
+                    authority.epoch,
+                    now,
+                ),
+            )
+            self._append_event(
+                run_id,
+                task_id,
+                attempt_id,
+                "review.decision",
+                "PENDING",
+                decision,
+                {"layer": layer, "decided_by": decided_by, "authority_epoch": authority.epoch},
+            )
+            self.connection.commit()
+            return decision_id
         except BaseException:
             self.connection.rollback()
             raise
@@ -4464,7 +4556,7 @@ class SQLiteStateStore:
 
     def _migrate_schema(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 11:
+        if version > 12:
             raise RuntimeError(f"database schema version {version} is newer than supported")
         if version < 2:
             with self.connection:
@@ -4531,6 +4623,8 @@ class SQLiteStateStore:
             self._migrate_to_v10()
         if version < 11:
             self._migrate_to_v11()
+        if version < 12:
+            self._migrate_to_v12()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -4983,6 +5077,30 @@ class SQLiteStateStore:
                     updated_at TEXT NOT NULL
                 );
                 PRAGMA user_version=11;
+                """
+            )
+
+    def _migrate_to_v12(self) -> None:
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS review_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT,
+                    layer TEXT NOT NULL CHECK(layer IN (
+                        'deterministic', 'model', 'human'
+                    )),
+                    decision TEXT NOT NULL CHECK(decision IN (
+                        'PASS', 'REWORK', 'BLOCKED', 'APPROVED', 'REJECTED'
+                    )),
+                    detail_json TEXT NOT NULL,
+                    decided_by TEXT NOT NULL,
+                    authority_epoch INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                PRAGMA user_version=12;
                 """
             )
 

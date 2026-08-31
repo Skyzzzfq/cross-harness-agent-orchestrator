@@ -122,6 +122,32 @@ def _parser() -> argparse.ArgumentParser:
     )
     stage2_mixed.add_argument("--run", dest="run_id")
     stage2_mixed.add_argument("--max-ticks", type=int, default=20)
+    approvals = subcommands.add_parser(
+        "approvals", help="list human approval requests"
+    )
+    approvals.add_argument("--run", dest="run_id", required=True)
+    approvals.add_argument("--status", default="PENDING")
+    approvals.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    approve = subcommands.add_parser(
+        "approve", help="approve a human approval request"
+    )
+    approve.add_argument("--request", dest="request_id", required=True)
+    approve.add_argument("--by", required=True, help="human operator id")
+    approve.add_argument("--comment", default=None)
+    approve.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    reject = subcommands.add_parser(
+        "reject", help="reject a human approval request"
+    )
+    reject.add_argument("--request", dest="request_id", required=True)
+    reject.add_argument("--by", required=True, help="human operator id")
+    reject.add_argument("--comment", default=None)
+    reject.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
     return parser
 
 
@@ -316,6 +342,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "ready" else 1
+    if args.command == "approvals":
+        store = SQLiteStateStore(_resolve_db(Path.cwd(), args.db))
+        try:
+            requests = store.list_approval_requests(
+                args.run_id, status=args.status
+            )
+        finally:
+            store.close()
+        print(
+            json.dumps(
+                {"status": "ready", "run_id": args.run_id, "requests": requests},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+    if args.command in ("approve", "reject"):
+        decision = "APPROVED" if args.command == "approve" else "REJECTED"
+        store = SQLiteStateStore(_resolve_db(Path.cwd(), args.db))
+        try:
+            store.decide_approval(
+                args.request_id,
+                decision,
+                decided_by=args.by,
+                comment=args.comment,
+            )
+        finally:
+            store.close()
+        print(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "request_id": args.request_id,
+                    "decision": decision,
+                    "decided_by": args.by,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
     if args.command == "spike":
         runners = {
             "codebuddy-sessions": run_codebuddy_session_spike,

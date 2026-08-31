@@ -95,13 +95,13 @@
    - `enqueue_merge`/`claim_merge_queue` 原子领取（串行）、`finish_merge` APPLIED → task COMPLETED、CONFLICT → IntegrationIssue；`record_outbox_intent`/`claim_outbox`/`finish_outbox` Transactional Outbox。
    - Git 层：`GitWorkspaceManager.integrate` 幂等（`git cherry` 补丁等价检测）、`result_commit_in_integration`、`assert_clean_for_write`（拒脏 checkout）、`safe_write_text`（原子写）、`create_worktree` 失败清理；`reconcile_merge_with_git` 对账已 APPLIED 不重放、遗留 APPLYING 安全重试。
 
-9. 业务 AuthorityLease、两阶段 Handoff、审批与预算（S2-09，核心已完成）
-   - schema v11：`authority_leases`（业务主管权，独立于 Run Controller lease，每 run 一行 epoch 递增）、`approval_requests`/`approval_decisions`（人工门禁）、`budgets`（硬预算）。
-   - `acquire_authority`/`renew_authority`/`active_authority` + `FencedAuthorityError`（旧 epoch 拒绝）；`request_authority_handoff`（活动 APPLYING merge 时拒绝）→ `accept` → `commit`（原子，epoch+1）。
-   - `create_approval_request`/`decide_approval`（单次使用不可重复决定）；`record_budget`/`budget_status`（时间/调用数/turn/任务数硬预算，超限检测）。
-   - 待续：三层审核中的确定性验证/模型审核层建模、人工审批 CLI 命令、预算派发前检查接入 scheduler。
+9. 业务 AuthorityLease、两阶段 Handoff、三层审核、审批与预算（S2-09，已完成）
+   - schema v11 `authority_leases`（业务主管权，独立于 Run Controller lease，每 run 一行 epoch 递增）+ `FencedAuthorityError`（旧 epoch 拒绝）；两阶段 Handoff（REQUESTED→ACCEPTED→COMMITTED，活动 merge 拒绝）。
+   - schema v11 `approval_requests/approval_decisions` + schema v12 `review_decisions`（三层审核：deterministic/model/human）。
+   - `budgets` + `budget_status`（时间/调用数/turn/任务数硬预算），`claim_ready_dispatch` 派发前检查超限停派。
+   - CLI `approvals/approve/reject` 人工审批命令（端到端验证通过）。
 
-当前验证：142 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
+当前验证：147 项单元、契约和 Fake 集成测试通过；无落盘编译通过；凭据特征扫描为 0。详细证据：`STAGE2_REPORT.md`。
 
 ## 3. 阶段 2 尚未完成：WorkBuddy 应按此顺序继续
 
@@ -141,14 +141,14 @@
 
 ### S2-09：审核、人工审批、预算和业务 Supervisor Handoff
 
-- [ ] 确定性验证、模型审核和人工门禁三层分离（人工门禁 `approval_requests/decisions` 已落地；确定性验证/模型审核层建模待续）。
-- [ ] 人类可执行查看、批准、驳回、重新分配和一次性审批命令（store 层 `create_approval_request`/`decide_approval` 已完成，CLI 审批命令待续）。
-- [~] 时间、调用数、turn、任务数硬预算；有权威 usage 时才把 Token/金额作为硬门禁（schema v11 `budgets` + `budget_status` 已完成，派发前检查接入 scheduler 待续）。
+- [x] 确定性验证、模型审核和人工门禁三层分离（schema v12 `review_decisions`：layer `deterministic/model/human`，`record_review_decision` 记录三层各自决定）。
+- [x] 人类可执行查看、批准、驳回、重新分配和一次性审批命令（`list_approval_requests` + CLI `approvals/approve/reject`；单次使用请求不可重复决定）。
+- [x] 时间、调用数、turn、任务数硬预算；有权威 usage 时才把 Token/金额作为硬门禁（`budgets` + `budget_status`，`claim_ready_dispatch` 派发前检查超限即停派）。
 - [x] 实现业务 `AuthorityLease`，不要与 Run Controller lease 混淆（schema v11 `authority_leases`，独立于 `run_controller_leases`）。
 - [x] Codex → CodeBuddy 两阶段原子主管移交；活动 merge 时拒绝 handoff（REQUESTED→ACCEPTED→COMMITTED，活动 APPLYING merge 时拒绝）。
-- [x] 旧业务 epoch 不能派发、审核或集成（`FencedAuthorityError`，旧 epoch token 的 renew/操作被拒）。
+- [x] 旧业务 epoch 不能派发、审核或集成（`FencedAuthorityError`，旧 epoch token 的 renew/record/操作被拒）。
 
-当前已通过 142 项测试（新增 7 项：authority epoch 接管、handoff 原子提交+旧 epoch fencing、活动 merge 拒 handoff、审批创建/单次使用、预算 upsert/超限检测）。
+当前已通过 147 项测试（S2-09 共新增 12 项：authority epoch 接管、handoff 原子+旧 epoch fencing、活动 merge 拒 handoff、审批单次使用、预算超限检测、预算派发停派、三层审核记录、审批列表）。
 
 ### S2-10：MVP 退出矩阵与签字
 

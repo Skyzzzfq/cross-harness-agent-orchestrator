@@ -205,7 +205,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "PRAGMA user_version"
                 ).fetchone()[0]
-                self.assertEqual(version, 11)
+                self.assertEqual(version, 12)
                 tables = {
                     row[0]
                     for row in migrated.connection.execute(
@@ -240,7 +240,7 @@ class SchemaMigrationTests(unittest.TestCase):
             with SQLiteStateStore(database) as migrated:
                 self.assertEqual(
                     migrated.connection.execute("PRAGMA user_version").fetchone()[0],
-                    11,
+                    12,
                 )
                 self.assertIsNotNone(
                     migrated.connection.execute(

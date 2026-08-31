@@ -2,7 +2,7 @@
 
 更新时间：2026-08-31
 
-状态：**进行中。前九切片（S2-01~S2-08 完成；S2-09 核心 AuthorityLease/Handoff/审批/预算 store 层完成，三层审核建模与人工审批 CLI、预算派发接入待续），尚未满足阶段 2 全部退出条件。**
+状态：**进行中。前九切片（S2-01~S2-09）已完成，S2-10（MVP 退出矩阵与签字）待验证，尚未满足阶段 2 全部退出条件。**
 
 ## 本切片范围
 
@@ -113,22 +113,24 @@
 - 实际运行库已从 schema v9 升级至 v10；升级前备份为 `.agent-hub/state/agent-hub.db.v9-backup-20260831-stage2`。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=10`、`integrity_check=ok`、`foreign_key_check=0`。
 - 第八切片共新增 14 项测试（write_scope 重叠串行化/不重叠并行、merge 入队原子领取、merge 成功完成 Task+Outbox、冲突记 IntegrationIssue、对账不重复 apply、outbox 投递流、integrate 幂等、result commit 补丁检测、脏 checkout 拒绝、原子写安全、worktree 失败清理、merge-with-git 对账 APPLIED/requeue）。第八切片结束时 135 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
 
-## 第九切片：业务 AuthorityLease、两阶段 Handoff、审批与预算（S2-09，核心已完成）
+## 第九切片：业务 AuthorityLease、两阶段 Handoff、三层审核、审批与预算（S2-09，已完成）
 
-- schema v11 新增四张表：
+- schema v11 + v12 新增五张表：
   - `authority_leases`（每 Run 唯一一行、`epoch` 递增、`state`/`handoff_state`）：业务 Supervisor 主管权，**与 `run_controller_leases` 彻底分离**——前者是业务层（谁能派发/审核/集成），后者是 Run 控制循环。
   - `approval_requests`（`PENDING/APPROVED/REJECTED/EXPIRED/USED`，`single_use`、`params_hash`、`expires_at`）+ `approval_decisions`：人工门禁。
   - `budgets`（每 Run 一行：`max_run_seconds`/`max_calls`/`max_turns`/`max_tasks`/`max_cost_decimal`）：硬预算。
+  - `review_decisions`（`layer`：`deterministic/model/human`，`decision`：PASS/REWORK/BLOCKED/APPROVED/REJECTED，`authority_epoch`）：三层审核分离。
 - **AuthorityLease**：`acquire_authority`（首次 epoch=1，接管递增 epoch 且旧 token 立即失效）、`renew_authority`、`active_authority`；`FencedAuthorityError` 拒绝旧 epoch 的一切主管动作。
 - **两阶段 Handoff**：`request_authority_handoff`（校验活动 `APPLYING` merge 时拒绝）→ `accept_authority_handoff`（REQUESTED→ACCEPTED）→ `commit_authority_handoff`（原子提交，epoch+1，owner 换为目标 agent）。旧业务 epoch 不能派发/审核/集成。
-- **人工审批**：`create_approval_request`（记录动作摘要、参数哈希、单次使用、作用域）+ `decide_approval`（APPROVED/REJECTED，已决定请求不可重复决定）。
-- **硬预算**：`record_budget`（按 Run upsert）+ `budget_status`（统计 backend_calls/tasks/run 时长，任一 `usage >= max` 即 `exceeded`）。
-- 实际运行库已从 schema v10 升级至 v11；升级前备份为 `.agent-hub/state/agent-hub.db.v10-backup-20260901-stage2`。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=11`、`integrity_check=ok`、`foreign_key_check=0`。
-- 第九切片新增 7 项测试（authority epoch 接管、handoff 原子提交+旧 epoch fencing、活动 merge 拒 handoff、审批创建/单次使用、预算 upsert/超限检测）。当前 142 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
+- **三层审核**：`record_review_decision` 记录确定性验证/模型审核/人工门禁三层各自决定，均受当前 authority epoch fencing。
+- **人工审批**：`create_approval_request`（动作摘要、参数哈希、单次使用、作用域）+ `decide_approval`（已决定请求不可重复决定）+ `list_approval_requests`；CLI `approvals/approve/reject` 人工命令端到端验证通过。
+- **硬预算**：`record_budget`（按 Run upsert）+ `budget_status`（任一 `usage >= max` 即 `exceeded`）；`claim_ready_dispatch` 派发前检查，超限零新增调用停派。
+- 实际运行库已从 schema v10 升级至 v12；升级前备份为 `.agent-hub/state/agent-hub.db.v10-backup-20260901-stage2`（v11）与 `.agent-hub/state/agent-hub.db.v11-backup-20260901-stage2`（v12）。升级后仍为 10 Run、20 Task、29 Attempt、293 Event，`user_version=12`、`integrity_check=ok`、`foreign_key_check=0`。
+- 第九切片共新增 12 项测试（authority epoch 接管、handoff 原子+旧 epoch fencing、活动 merge 拒 handoff、审批单次使用、预算 upsert/超限检测、预算派发停派、三层审核记录、审批列表）。当前 147 项单元、契约和 Fake 集成测试全部通过，无落盘编译通过，凭据特征扫描为 0。
 
 ## 明确未完成
 
-- S2-09 剩余：三层审核中的确定性验证/模型审核层建模；人类可执行查看/批准/驳回/重新分配/一次性审批 CLI 命令；预算派发前检查接入 Scheduler（`claim_ready_dispatch` 查 `budget_status`，超限停派）。
+- S2-10（MVP 退出矩阵与签字）待验证：50 个预冻结 Fake 场景状态不变量、强杀 0 重复 merge、费用对账、安全负向矩阵；满足后更新本报告为“通过”并创建阶段 2 完成提交。
 - 还没有正式的状态页 / 时间线 / 成本视图；CLI 控制命令已可人工执行。
 
-下一切片补齐 S2-09 的审核建模、人工审批 CLI 与预算派发接入，随后进入 S2-10（MVP 退出矩阵与签字）。
+下一切片执行 S2-10（MVP 退出矩阵与签字）。
