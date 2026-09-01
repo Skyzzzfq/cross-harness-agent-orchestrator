@@ -22,6 +22,7 @@ from orchestrator.adapters.contracts import (
     UsageReport,
 )
 from orchestrator.core.models import utc_now
+from orchestrator.core.sanitize import redact_sensitive
 from orchestrator.platform import codex_transport_environment
 
 
@@ -103,11 +104,18 @@ class CodexBackendAdapter:
             CodexConfig(env=codex_transport_environment(Path(request.policy.cwd)))
         )
         await codex.__aenter__()
+        # P1-04：写任务在受管 worktree 内使用可写 sandbox（cwd 已由
+        # WorkspacePolicy 校验属于受管 worktree）；只读任务保持 read_only。
+        sandbox = (
+            Sandbox.workspace_write
+            if request.policy.access_mode == "write"
+            else Sandbox.read_only
+        )
         thread = await codex.thread_start(
             approval_mode=ApprovalMode.deny_all,
             cwd=request.policy.cwd,
             ephemeral=True,
-            sandbox=Sandbox.read_only,
+            sandbox=sandbox,
         )
         turn = await thread.turn(request.prompt)
         return _CodexRunningCall(codex, thread.id, turn, request)
@@ -151,6 +159,21 @@ class _CodexRunningCall(_BaseRunningCall):
                     ),
                 )
         except TimeoutError:
+            # P1-05：超时后底层 Turn 可能仍在运行——必须尝试 interrupt，
+            # 且显式声明 backend_may_still_run，让编排器隔离晚到结果。
+            backend_may_still_run = True
+            try:
+                await asyncio.wait_for(self._turn.interrupt(), timeout=15.0)
+            except Exception:
+                pass
+            else:
+                try:
+                    await asyncio.wait_for(self._task, timeout=30.0)
+                except TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    pass
+                backend_may_still_run = False
             await self._finish(
                 CallState.TIMED_OUT,
                 failure=Failure(
@@ -158,6 +181,7 @@ class _CodexRunningCall(_BaseRunningCall):
                     message="codex turn exceeded the configured deadline",
                     retryable=True,
                 ),
+                backend_may_still_run=backend_may_still_run,
             )
         except asyncio.CancelledError:
             return
@@ -166,7 +190,7 @@ class _CodexRunningCall(_BaseRunningCall):
                 CallState.FAILED,
                 failure=Failure(
                     kind="sdk_error",
-                    message=str(exc)[:500],
+                    message=redact_sensitive(str(exc))[:500],
                     retryable=True,
                 ),
             )
@@ -227,7 +251,7 @@ class _CodexRunningCall(_BaseRunningCall):
                 CallState.CANCELLED,
                 failure=Failure(
                     kind="cancelled",
-                    message=f"{reason}; interrupt error: {exc}",
+                    message=redact_sensitive(f"{reason}; interrupt error: {exc}"),
                     retryable=False,
                 ),
                 backend_may_still_run=True,
@@ -334,7 +358,7 @@ class _CodeBuddyRunningCall(_BaseRunningCall):
                     CallState.FAILED,
                     failure=Failure(
                         kind="model_error",
-                        message=(
+                        message=redact_sensitive(
                             getattr(result_message, "error_message", None)
                             or "codebuddy returned an error result"
                         )[:500],
@@ -366,7 +390,7 @@ class _CodeBuddyRunningCall(_BaseRunningCall):
                 CallState.FAILED,
                 failure=Failure(
                     kind="sdk_error",
-                    message=str(exc)[:500],
+                    message=redact_sensitive(str(exc))[:500],
                     retryable=True,
                 ),
             )

@@ -13,7 +13,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 |---|---|---|---|
 | 阶段 0：可行性闸门 | GO | SPIKE_REPORT.md、ACCOUNT_BOUNDARIES.md | 是 |
 | 阶段 1：PoC | PASS | STAGE1_REPORT.md、真实三连跑历史 | 是 |
-| 阶段 2：MVP | AUDIT-OPEN | 183 项组件测试、schema v12、审计与对账报告 | **否** |
+| 阶段 2：MVP | AUDIT-OPEN | 193 项组件测试、schema v12、审计与对账报告 | **否** |
 | 阶段 3：Beta | 未开始 | 无 | 否 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现。WorkBuddy 已在 STAGE2_AUDIT_RESPONSE.md 中确认全部 3 项 P0、6 项 P1 和 4 项文档问题成立，因此原签字已撤销。
@@ -21,7 +21,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 ## 2. 已验证基线
 
 - 当前远端和本地基线：87b875e，提交说明为 stage2: checkpoint audit findings and workbuddy response。
-- 全量测试：183/183 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
+- 全量测试：193/193 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW，且 2 CodeBuddy + 1 Codex 存在真实并行重叠。
@@ -69,8 +69,14 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 ### P1
 
 - [ ] P1-01 【MVP 必需】修正 REVIEW 被当作 terminal 的统计，并重跑完整真实终态矩阵。
-- [ ] P1-04 【MVP 必需】真实写 Adapter 接入受管 worktree 和常驻 Scheduler。
-- [ ] P1-05 【MVP 必需】超时/取消不确定性、Session 隔离和持久化前统一脱敏（安全相关）。
+- [x] P1-04 【MVP 必需】真实写 Adapter 接入受管 worktree 和常驻 Scheduler。
+  - Codex adapter 按 `access_mode` 选择 sandbox：write → `Sandbox.workspace_write`（cwd 已由 WorkspacePolicy 校验属于受管 worktree），read_only 保持 `Sandbox.read_only`。
+  - CLI `serve --backend codex|codebuddy|fake` 可配置真实 Adapter（不再写死 Fake）。
+  - 新增写任务闭环测试：两个不重叠写任务并行 → REVIEW → 真实 `MergeExecutor` 集成 → COMPLETED；写只发生在受管 worktree，主仓库工作区全程 `is_clean`（用户 checkout 指纹保护）；项目外 cwd / `..` scope 被拒。
+- [x] P1-05 【MVP 必需】超时/取消不确定性、Session 隔离和持久化前统一脱敏（安全相关）。
+  - Codex timeout 后尝试 `turn.interrupt()`；确认成功则 `backend_may_still_run=False`，否则显式 `True`（晚到结果由编排器隔离）。
+  - 新增 `orchestrator/core/sanitize.py` `redact_sensitive()`：API key/bearer/session token/cookie/敏感 key=value/URL query 凭据统一掩码；应用到 `real.py` 所有 failure message 持久化路径（sdk_error/model_error/interrupt error）。
+  - 新增 7 项脱敏测试：API key、bearer、key=value secret、URL query、password、明文不变、空安全。
 - [ ] P1-02 【Beta 再补】补齐 turn、Token、金额预算和并发预算预留（calls/tasks/时间预算已够 MVP；金额预算需权威 usage）。
 - [ ] P1-03 【Beta 再补】审批 scope/params/expiry/single-use 原子消费，并实现重新分配（记录型审批已够 MVP，消费增强进 Beta）。
 - [ ] P1-06 【Beta 再补】Outbox 持久 claim、退避重试和死信处理（MVP 已有 Outbox 表与投递，重试增强进 Beta）。
@@ -82,7 +88,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 1. stage2: checkpoint enforce authority and takeover fencing（P0-01，✅ 已完成）
 2. stage2: checkpoint canonical workspace and write scopes（P0-03，✅ 已完成）
 3. stage2: checkpoint transactional merge git and outbox（P0-02，✅ 已完成）
-4. stage2: checkpoint real writable scheduler and cancellation（P1-04 + P1-05）
+4. stage2: checkpoint real writable scheduler and cancellation（P1-04 + P1-05，✅ 已完成）
 5. stage2: checkpoint corrected exit matrix and handoff records（P1-01，重跑矩阵）
 6. 所有 MVP 必需项关闭并重新验收后，创建新的 stage2: complete 提交（Beta 再补项 P1-02/P1-03/P1-06 转入阶段 3 继续）。
 

@@ -11,7 +11,7 @@
 
 ## 2. 当前可信验证
 
-- 183 项单元、契约和 Fake 集成测试通过。
+- 193 项单元、契约和 Fake 集成测试通过。
 - 实际数据库 schema v12，integrity_check=ok，foreign_key_check=0。
 - 真实 10 个只读 Adapter 场景均成功到达 REVIEW 并匹配 marker。
 - 2 CodeBuddy + 1 Codex 真实调用存在时间重叠。
@@ -49,11 +49,11 @@
 ### P1
 
 1. 真实 10/10 只到 REVIEW。
-2. turn、Token、金额预算未执行。
-3. approval 未原子消费，expiry/scope/params/single-use 未执行，缺少重新分配命令。
-4. 真实 Adapter 和常驻 serve 没有写任务闭环。
-5. Codex timeout、CodeBuddy cancel 和错误信息脱敏不完整。
-6. Outbox FAILED 不重试，没有持久投递器。
+2. turn、Token、金额预算未执行。【Beta 再补】
+3. approval 未原子消费，expiry/scope/params/single-use 未执行，缺少重新分配命令。【Beta 再补】
+4. ~~真实 Adapter 和常驻 serve 没有写任务闭环。~~ **已修复（本轮）**：Codex 写模式用 `Sandbox.workspace_write`（限受管 worktree）；`serve --backend codex|codebuddy|fake` 可配真实 Adapter；写任务闭环测试（并行写→REVIEW→真实集成→COMPLETED，主仓库工作区全程 clean）。
+5. ~~Codex timeout、CodeBuddy cancel 和错误信息脱敏不完整。~~ **已修复（本轮）**：Codex timeout 后尝试 interrupt 并显式 `backend_may_still_run`；新增 `redact_sensitive()` 统一脱敏并应用到所有 failure 持久化路径。
+6. Outbox FAILED 不重试，没有持久投递器。【Beta 再补】
 
 ## 5. 整改计划
 

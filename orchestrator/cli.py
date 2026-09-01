@@ -79,6 +79,13 @@ def _parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--interval", type=float, default=1.0)
     serve_parser.add_argument("--lease", type=int, default=300)
     serve_parser.add_argument("--max-ticks", type=int, default=None)
+    # P1-04：常驻服务可选接入真实 Adapter（写任务需配合受管 worktree）
+    serve_parser.add_argument(
+        "--backend",
+        choices=("fake", "codex", "codebuddy"),
+        default="fake",
+        help="adapter backend for the resident loop (default: fake)",
+    )
     pause = subcommands.add_parser("pause", help="pause dispatch for a Run")
     pause.add_argument("--run", dest="run_id", required=True)
     pause.add_argument("--reason", default="manual-pause")
@@ -232,12 +239,22 @@ def _run_serve(
     interval: float,
     lease: int,
     max_ticks: int | None,
+    backend: str = "fake",
 ) -> dict[str, object]:
     store = SQLiteStateStore(_resolve_db(cwd, db))
     try:
-        # S2-06 serves the deterministic Fake backend; real Codex/CodeBuddy
-        # adapters are wired into the scheduler in S2-07.
-        adapters = {"fake": FakeBackendAdapter()}
+        # P1-04：常驻服务可配置 Fake/Codex/中国站 CodeBuddy Adapter。
+        # 真实写任务需配合受管 worktree 注册与 WorkspacePolicy。
+        if backend == "codex":
+            from orchestrator.adapters.real import CodexBackendAdapter
+
+            adapters = {"codex": CodexBackendAdapter()}
+        elif backend == "codebuddy":
+            from orchestrator.adapters.real import CodeBuddyBackendAdapter
+
+            adapters = {"codebuddy": CodeBuddyBackendAdapter()}
+        else:
+            adapters = {"fake": FakeBackendAdapter()}
         try:
             return asyncio.run(
                 serve(
@@ -298,6 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.interval,
             args.lease,
             args.max_ticks,
+            args.backend,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] in {"stopped", "interrupted"} else 1
