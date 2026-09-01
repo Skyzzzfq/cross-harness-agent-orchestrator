@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：194/194 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：197/197 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -108,7 +108,30 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 7. 阶段 3
 
-阶段 2 已重新签字（PASS），**允许进入阶段 3**。阶段 3 门槛：24 小时 Fake 稳定运行、20 个真实场景、状态页、Windows 矩阵、数据库回滚演练；同时处理转入的 Beta 再补项（P1-02 完整预算、P1-03 审批原子消费+重新分配、P1-06 Outbox 重试）。
+阶段 2 已重新签字（PASS），**允许进入阶段 3**。
+
+### 7.1 任务台账（按执行顺序）
+
+| # | 任务 | 说明 |
+|---|---|---|
+| T1 | **24h 稳定运行测试框架** | ✅ 已完成（`scripts/stage3_stability_run.py`）：高密度 40 task 0 丢/0 重复 merge 测试 + 崩溃注入对账 + 可配置 24h 长跑脚本（注入→drain 阶段、周期不变量检查 0 丢/0 重复/0 重复通知，报告写入 `.agent-hub/stage3-stability/`）。`serve` 支持外部持有 controller（不自动释放），供长跑驱动复用。 |
+| T2 | **20 个预冻结真实场景** | 真实 Codex/CodeBuddy 完整终态（审核+集成到 COMPLETED），扩展 `stage2-real` 框架到 20 场景 |
+| T3 | **本地状态页 + 管理控制台** | ①只读状态页：时间线/任务状态/成本/诊断包（localhost）；②**管理控制台（用户新需求）**：发起新任务、审批单处理（merge/force-takeover）、取消/暂停/恢复、Git 冲突处理——写操作**必须复用 store 的 fencing/authority 校验**，不绕过安全边界；技术：FastAPI 或 http.server + 无构建静态前端 |
+| T4 | **Adapter 能力协商与回归** | 版本探测、能力协商、功能开关、模型/Prompt 回归 |
+| T5 | **Windows 支持矩阵** | 中文/空格/CRLF/长路径/文件锁/进程树 |
+| T6 | **数据库升级/降级/备份/恢复演练** | 含 15 分钟 rollback |
+| T7 | **干净 Windows bootstrap** | 30 分钟安装演示 |
+| T8 | **可选 8 Agent + MCP/native timebox** | 1-2 天非阻断评估 |
+
+### 7.2 Beta 再补项（阶段 2 审计遗留，在本阶段内处理）
+
+- B1（P1-02）金额/turn/Token 硬预算 + 并发预算预留
+- B2（P1-03）审批 scope/params/expiry/single-use 原子消费 + 重新分配命令
+- B3（P1-06）Outbox 持久 claim、退避重试、死信
+
+### 7.3 退出条件
+
+24h Fake ≥500 Task 0 丢/0 重复；20 真实场景 ≥19 正确；drain 后孤儿进程/worktree 为 0；Windows 路径安全处理；Prompt 注入 4 项 0；升级/降级/恢复演练；15 分钟 rollback；30 分钟干净安装演示。全部满足后创建 `stage3: complete Beta`。
 
 ## 8. 文件权威顺序
 

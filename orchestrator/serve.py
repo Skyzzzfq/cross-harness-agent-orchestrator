@@ -8,7 +8,7 @@ from typing import Any
 from orchestrator.adapters.contracts import BackendAdapter
 from orchestrator.agent_pool import reconcile_pool_once
 from orchestrator.core.config import TeamSpec
-from orchestrator.core.models import AuthorityToken
+from orchestrator.core.models import AuthorityToken, ControllerToken
 from orchestrator.reconciler import reconcile_once
 from orchestrator.scheduler import scheduler_tick
 from orchestrator.storage.sqlite_store import (
@@ -25,6 +25,7 @@ async def serve(
     team_spec: TeamSpec | None = None,
     *,
     authority: AuthorityToken | None = None,
+    controller: ControllerToken | None = None,
     git_manager: Any | None = None,
     outbox_deliver: Any | None = None,
     interval: float = 1.0,
@@ -49,15 +50,21 @@ async def serve(
         raise ValueError("controller_lease_seconds must be at least 1")
 
     owner = f"serve-{uuid.uuid4().hex}"
-    token = store.acquire_run_controller(
-        run_id, owner, lease_seconds=controller_lease_seconds
-    )
-    if token is None:
-        return {
-            "status": "busy",
-            "run_id": run_id,
-            "scheduler_owner": owner,
-        }
+    owns_controller = controller is None
+    if controller is not None:
+        if controller.run_id != run_id:
+            raise FencedControllerError("controller token belongs to another Run")
+        token = controller
+    else:
+        token = store.acquire_run_controller(
+            run_id, owner, lease_seconds=controller_lease_seconds
+        )
+        if token is None:
+            return {
+                "status": "busy",
+                "run_id": run_id,
+                "scheduler_owner": owner,
+            }
 
     authority_token = authority
     if authority_token is None:
@@ -165,7 +172,8 @@ async def serve(
     finally:
         heartbeat_stop.set()
         await heartbeat_task
-        try:
-            store.release_run_controller(token)
-        except FencedControllerError:
-            pass
+        if owns_controller:
+            try:
+                store.release_run_controller(token)
+            except FencedControllerError:
+                pass
