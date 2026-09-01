@@ -88,11 +88,13 @@ async def _run_scenarios(
             store.transition_task(task_id, TaskState.READY, reason="frozen-scenario")
 
         results: dict[str, Any] = {}
+        authority = store.acquire_authority(run_id, "stage2-supervisor", "supervisor")
         for _ in range(max_ticks):
             await scheduler_tick(
                 store,
                 run_id=run_id,
                 adapters=adapters,
+                authority=authority,
                 lease_seconds=lease_seconds,
                 controller_lease_seconds=300,
             )
@@ -193,11 +195,13 @@ async def _run_mixed_parallel(
             store.transition_task(task_id, TaskState.READY, reason="mixed-parallel")
 
         started = time.monotonic()
+        authority = store.acquire_authority(run_id, "stage2-supervisor", "supervisor")
         for _ in range(max_ticks):
             await scheduler_tick(
                 store,
                 run_id=run_id,
                 adapters=adapters,
+                authority=authority,
                 lease_seconds=lease_seconds,
                 controller_lease_seconds=300,
             )

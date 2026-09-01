@@ -110,6 +110,9 @@ class ExitMatrixTests(unittest.IsolatedAsyncioTestCase):
                 )
                 store.transition_task(f"task-{i}", TaskState.READY, reason="ready")
             token = store.acquire_run_controller("run-1", "op", lease_seconds=60)
+            authority = store.acquire_authority(
+                "run-1", "test-supervisor", "supervisor"
+            )
             states: list[TaskState] = []
             for tick in range(20):
                 if cancel_after_ticks is not None and tick == cancel_after_ticks:
@@ -126,6 +129,7 @@ class ExitMatrixTests(unittest.IsolatedAsyncioTestCase):
                     store,
                     run_id="run-1",
                     adapters={"fake": adapter},
+                    authority=authority,
                     controller=token,
                     lease_seconds=60,
                 )
@@ -370,9 +374,13 @@ class CostReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 default_behavior=FakeBehavior(delay_seconds=0.05, text="ok")
             )
             token = store.acquire_run_controller("run-1", "op", lease_seconds=60)
+            authority = store.acquire_authority(
+                "run-1", "test-supervisor", "supervisor"
+            )
             for _ in range(10):
                 await scheduler_tick(
                     store, run_id="run-1", adapters={"fake": adapter},
+                    authority=authority,
                     controller=token, lease_seconds=60,
                 )
                 if all(

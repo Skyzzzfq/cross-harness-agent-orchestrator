@@ -14,9 +14,10 @@ from orchestrator.adapters.contracts import (
     Failure,
 )
 from orchestrator.call_runtime import execute_adapter_call, recover_starting_calls
-from orchestrator.core.models import ControllerToken, utc_now
+from orchestrator.core.models import AuthorityToken, ControllerToken, utc_now
 from orchestrator.storage.sqlite_store import (
     FencedAttemptError,
+    FencedAuthorityError,
     FencedControllerError,
     SQLiteStateStore,
 )
@@ -27,6 +28,7 @@ async def scheduler_tick(
     *,
     run_id: str,
     adapters: Mapping[str, BackendAdapter],
+    authority: AuthorityToken,
     limit: int = 100,
     lease_seconds: int = 60,
     scheduler_owner: str | None = None,
@@ -178,11 +180,13 @@ async def scheduler_tick(
         dag_reconciled = store.reconcile_task_graph(
             run_id,
             controller=token,
+            authority=authority,
         )
         for _ in range(limit):
             claim = store.claim_ready_dispatch(
                 run_id,
                 controller=token,
+                authority=authority,
                 lease_seconds=lease_seconds,
             )
             if claim is None:

@@ -84,6 +84,9 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
 
     async def asyncTearDown(self) -> None:
         self.store.close()
@@ -96,12 +99,13 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self.store.create_task("run-1", "task-1")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
+        claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         # 重启后：result commit 已在集成分支（is_applied=True）→ 标记 APPLIED，不重复 merge
         result = self.store.reconcile_merge_with_git(
-            "run-1", token, is_applied=lambda commit: True
+            "run-1", token, is_applied=lambda commit: True, authority=self.authority
         )
         self.assertEqual(result["reapplied"], [])
         self.assertEqual(result["marked_applied"], [claim["merge_id"]])
@@ -114,11 +118,12 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self.store.create_task("run-1", "task-1")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
+        claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         result = self.store.reconcile_merge_with_git(
-            "run-1", token, is_applied=lambda commit: False
+            "run-1", token, is_applied=lambda commit: False, authority=self.authority
         )
         self.assertEqual(result["requeued"], [claim["merge_id"]])
         row = self.store.connection.execute(
@@ -136,6 +141,9 @@ class KillRestartMergeTests(unittest.TestCase):
         self.store = SQLiteStateStore(root / "state.db")
         self.store.create_run("run-1", "team-1")
         self.store.create_task("run-1", "task-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -154,15 +162,18 @@ class KillRestartMergeTests(unittest.TestCase):
         token = self.store.acquire_run_controller("run-1", "ghost", lease_seconds=60)
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", result_commit, self.base,
-            token, reason="review-passed",
+            token, authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
+        claim = self.store.claim_merge_queue(
+            "run-1", token, authority=self.authority
+        )
         self.store.release_run_controller(token)
 
         # 重启后对账：result commit 已在集成分支 → 标记 APPLIED，不重复 merge
         new_token = self.store.acquire_run_controller("run-1", "restarted", lease_seconds=60)
         result = self.store.reconcile_merge_with_git(
             "run-1", new_token,
+            authority=self.authority,
             is_applied=lambda commit: self.manager.result_commit_in_integration(commit),
         )
         self.assertIn(claim["merge_id"], result["marked_applied"])

@@ -23,6 +23,9 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
         reconcile_pool_once(
             self.store,
             "run-1",
@@ -61,11 +64,13 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self.store.pause_run("run-1", token, reason="manual-pause")
         self.assertIsNone(
-            self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+            self.store.claim_ready_dispatch(
+                "run-1", controller=token, authority=self.authority, lease_seconds=60
+            )
         )
         self.store.resume_run("run-1", token, reason="manual-resume")
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=token, lease_seconds=60
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
         )
         self.assertIsNotNone(claim)
 
@@ -75,7 +80,7 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self.store.pause_task("task-1", token, reason="hold-this-one")
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=token, lease_seconds=60
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
         )
         self.assertIsNotNone(claim)
         self.assertEqual(claim.task_id, "task-2")
@@ -88,7 +93,7 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
         self.store.resume_run("run-1", token, reason="resume")
         self.store.resume_run("run-1", token, reason="resume-again")
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=token, lease_seconds=60
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
         )
         self.assertIsNotNone(claim)
 
@@ -98,6 +103,9 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
         reconcile_pool_once(
             self.store,
             "run-1",
@@ -187,6 +195,7 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
                 self.store,
                 run_id="run-1",
                 adapters={"fake": adapter},
+                authority=self.authority,
                 controller=token,
             )
         )
@@ -220,6 +229,7 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
                 self.store,
                 run_id="run-1",
                 adapters={"fake": adapter},
+                authority=self.authority,
                 controller=token,
             )
         )
@@ -242,7 +252,7 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
         )
         token = self._controller("scheduler-test")
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=token, lease_seconds=60
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
         )
         self.assertIsNotNone(claim)
         self.store.request_cancel_task(
@@ -269,7 +279,12 @@ class CancelTests(unittest.IsolatedAsyncioTestCase):
         adapter = FakeBackendAdapter(
             default_behavior=FakeBehavior(delay_seconds=0, terminal=CallState.BLOCKED)
         )
-        await scheduler_tick(self.store, run_id="run-1", adapters={"fake": adapter})
+        await scheduler_tick(
+            self.store,
+            run_id="run-1",
+            adapters={"fake": adapter},
+            authority=self.authority,
+        )
         self.assertEqual(self.store.task_state("task-1"), TaskState.FAILED)
         token = self._controller()
         disposition = self.store.request_cancel_task(
@@ -304,6 +319,9 @@ class ServeLoopTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
         reconcile_pool_once(
             self.store,
             "run-1",
@@ -359,6 +377,7 @@ class ServeLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": adapter},
+            authority=self.authority,
             team_spec=self.team_spec,
             interval=0.05,
             max_ticks=6,
@@ -387,6 +406,7 @@ class ServeLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": adapter},
+            authority=self.authority,
             team_spec=self.team_spec,
             interval=0.3,
             max_ticks=30,

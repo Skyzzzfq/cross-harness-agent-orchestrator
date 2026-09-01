@@ -19,6 +19,9 @@ class WriteScopeSerializationTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
         reconcile_pool_once(
             self.store,
             "run-1",
@@ -57,14 +60,24 @@ class WriteScopeSerializationTests(unittest.IsolatedAsyncioTestCase):
             default_behavior=FakeBehavior(delay_seconds=0.1, text="done")
         )
         # 第一个 tick：task-a 被派发（ACTIVE），task-b 因重叠被阻止
-        await scheduler_tick(self.store, run_id="run-1", adapters={"fake": adapter})
+        await scheduler_tick(
+            self.store,
+            run_id="run-1",
+            adapters={"fake": adapter},
+            authority=self.authority,
+        )
         self.assertEqual(self.store.task_state("task-a"), TaskState.REVIEW)
         self.assertIn(
             self.store.task_state("task-b"),
             {TaskState.READY, TaskState.ACTIVE},
         )
         # task-a 完成后（REVIEW），下一个 tick 才能派发 task-b
-        await scheduler_tick(self.store, run_id="run-1", adapters={"fake": adapter})
+        await scheduler_tick(
+            self.store,
+            run_id="run-1",
+            adapters={"fake": adapter},
+            authority=self.authority,
+        )
         self.assertEqual(self.store.task_state("task-b"), TaskState.REVIEW)
 
     async def test_non_overlapping_write_scope_dispatches_in_parallel(self) -> None:
@@ -73,7 +86,12 @@ class WriteScopeSerializationTests(unittest.IsolatedAsyncioTestCase):
         adapter = FakeBackendAdapter(
             default_behavior=FakeBehavior(delay_seconds=0.05, text="done")
         )
-        await scheduler_tick(self.store, run_id="run-1", adapters={"fake": adapter})
+        await scheduler_tick(
+            self.store,
+            run_id="run-1",
+            adapters={"fake": adapter},
+            authority=self.authority,
+        )
         self.assertEqual(self.store.task_state("task-a"), TaskState.REVIEW)
         self.assertEqual(self.store.task_state("task-b"), TaskState.REVIEW)
 
@@ -83,6 +101,9 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor"
+        )
 
     async def asyncTearDown(self) -> None:
         self.store.close()
@@ -102,28 +123,34 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.store.create_task("run-1", "task-1")
         self.store.create_task("run-1", "task-2")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
         self.store.enqueue_merge(
-            "run-1", "task-2", "attempt-2", "def456", "base0", token, reason="review-passed"
+            "run-1", "task-2", "attempt-2", "def456", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claimed = self.store.claim_merge_queue("run-1", token)
+        claimed = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         self.assertEqual(claimed["task_id"], "task-1")
         # 同一事务内重复 claim 拿不到已领取的
-        second = self.store.claim_merge_queue("run-1", token)
+        second = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         self.assertEqual(second["task_id"], "task-2")
 
     async def test_merge_apply_success_completes_task_and_writes_outbox(self) -> None:
         token = self._controller()
         self._reviewed_task("task-1")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
+        claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         self.store.record_outbox_intent(
             "run-1", "merge", claim["merge_id"], "merge.applied", {"commit": "abc123"}, token
         )
-        self.store.finish_merge(claim["merge_id"], "applied", token, result_commit="abc123")
+        self.store.finish_merge(
+            claim["merge_id"], "applied", token,
+            authority=self.authority, result_commit="abc123",
+        )
         self.assertEqual(self.store.task_state("task-1"), TaskState.COMPLETED)
         outbox = self.store.connection.execute(
             "SELECT event_type, status FROM outbox WHERE run_id='run-1'"
@@ -135,13 +162,15 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self._reviewed_task("task-1")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
+        claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
         self.store.finish_merge(
             claim["merge_id"],
             "conflict",
             token,
+            authority=self.authority,
             issue_kind="content_conflict",
             issue_detail={"paths": ["demo/a.txt"]},
         )
@@ -155,10 +184,14 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
         token = self._controller()
         self.store.create_task("run-1", "task-1")
         self.store.enqueue_merge(
-            "run-1", "task-1", "attempt-1", "abc123", "base0", token, reason="review-passed"
+            "run-1", "task-1", "attempt-1", "abc123", "base0", token,
+            authority=self.authority, reason="review-passed",
         )
-        claim = self.store.claim_merge_queue("run-1", token)
-        self.store.finish_merge(claim["merge_id"], "applied", token, result_commit="abc123")
+        claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
+        self.store.finish_merge(
+            claim["merge_id"], "applied", token,
+            authority=self.authority, result_commit="abc123",
+        )
         # 重启后对账：已 APPLIED 的记录不应被再次 claim 或 apply
         reconciled = self.store.reconcile_merge_queue("run-1", token)
         self.assertEqual(reconciled["reapplied"], [])

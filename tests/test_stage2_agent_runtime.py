@@ -458,6 +458,10 @@ class RunControllerLeaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        # 长租约：本类测试用 2030 时间戳模拟，authority 需覆盖到那时
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor", lease_seconds=126144000
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -544,6 +548,7 @@ class RunControllerLeaseTests(unittest.TestCase):
                 controller=first,
                 lease_seconds=60,
                 now="2030-01-01T00:00:02+00:00",
+                authority=self.authority,
             )
         self.assertEqual(
             self.store.connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0],
@@ -555,6 +560,7 @@ class RunControllerLeaseTests(unittest.TestCase):
             controller=second,
             lease_seconds=60,
             now="2030-01-01T00:00:02+00:00",
+            authority=self.authority,
         )
         self.assertIsNotNone(claim)
 
@@ -583,6 +589,7 @@ class RunControllerLeaseTests(unittest.TestCase):
             controller=first,
             lease_seconds=60,
             now="2030-01-01T00:00:01+00:00",
+            authority=self.authority,
         )
         second = self.store.handoff_run_controller(
             first,
@@ -919,6 +926,9 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = SQLiteStateStore(Path(self.temp.name) / "state.db")
         self.store.create_run("run-1", "team-1")
+        self.authority = self.store.acquire_authority(
+            "run-1", "test-supervisor", "supervisor", lease_seconds=126144000
+        )
         reconcile_pool_once(
             self.store,
             "run-1",
@@ -970,6 +980,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": adapter},
+            authority=self.authority,
         )
         elapsed = time.monotonic() - started
         self.assertEqual(len(result["dispatched"]), 2)
@@ -1003,6 +1014,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": adapter},
+            authority=self.authority,
         )
         self.assertEqual(repeated["dispatched"], [])
         self.assertEqual(
@@ -1025,6 +1037,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": FakeBackendAdapter()},
+            authority=self.authority,
             scheduler_owner="scheduler-b",
         )
         self.assertEqual(result["status"], "busy")
@@ -1043,12 +1056,12 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         first = await scheduler_tick(
-            self.store, run_id="run-1", adapters={"fake": adapter}
+            self.store, run_id="run-1", adapters={"fake": adapter}, authority=self.authority
         )
         self.assertEqual(first["outcomes"][0]["disposition"], "requeued")
         self.assertEqual(self.store.task_state("task-1"), TaskState.READY)
         delayed = await scheduler_tick(
-            self.store, run_id="run-1", adapters={"fake": adapter}
+            self.store, run_id="run-1", adapters={"fake": adapter}, authority=self.authority
         )
         self.assertEqual(delayed["dispatched"], [])
         retry_window = self.store.connection.execute(
@@ -1070,7 +1083,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
                 """
             )
         second = await scheduler_tick(
-            self.store, run_id="run-1", adapters={"fake": adapter}
+            self.store, run_id="run-1", adapters={"fake": adapter}, authority=self.authority
         )
         self.assertEqual(second["outcomes"][0]["disposition"], "failed")
         self.assertEqual(self.store.task_state("task-1"), TaskState.FAILED)
@@ -1090,7 +1103,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         result = await scheduler_tick(
-            self.store, run_id="run-1", adapters={"fake": adapter}
+            self.store, run_id="run-1", adapters={"fake": adapter}, authority=self.authority
         )
         self.assertEqual(result["outcomes"][0]["disposition"], "failed")
         self.assertEqual(adapter.launch_count, 0)
@@ -1111,6 +1124,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": FakeBackendAdapter()},
+            authority=self.authority,
         )
         self.assertEqual(
             [outcome["task_id"] for outcome in result["outcomes"]],
@@ -1131,6 +1145,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": FakeBackendAdapter()},
+            authority=self.authority,
             limit=1,
         )
         self.assertEqual(result["outcomes"][0]["task_id"], "low-2")
@@ -1151,6 +1166,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
                 self.store,
                 run_id="run-1",
                 adapters={"fake": adapter},
+                authority=self.authority,
             )
             self.assertEqual(result["outcomes"][0]["disposition"], "requeued")
             row = self.store.connection.execute(
@@ -1188,6 +1204,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             self.store,
             run_id="run-1",
             adapters={"fake": FakeBackendAdapter()},
+            authority=self.authority,
         )
         self.assertEqual(len(result["dispatched"]), 1)
         states = {
@@ -1207,7 +1224,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             "run-1", "scheduler-1", lease_seconds=60
         )
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=first, lease_seconds=60
+            "run-1", controller=first, authority=self.authority, lease_seconds=60
         )
         self.assertIsNotNone(claim)
         second = self.store.handoff_run_controller(
@@ -1233,7 +1250,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             "run-1", "scheduler-1", lease_seconds=60
         )
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=first, lease_seconds=60
+            "run-1", controller=first, authority=self.authority, lease_seconds=60
         )
         self.store.authorize_backend_call(claim.call_id, controller=first)
         second = self.store.handoff_run_controller(
@@ -1258,7 +1275,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             "run-1", "scheduler-1", lease_seconds=60
         )
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=controller, lease_seconds=60
+            "run-1", controller=controller, authority=self.authority, lease_seconds=60
         )
         with self.store.connection:
             self.store.connection.execute(
@@ -1296,6 +1313,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
                     default_behavior=FakeBehavior(delay_seconds=1.1, text="done")
                 )
             },
+            authority=self.authority,
             controller_lease_seconds=1,
         )
         self.assertEqual(result["outcomes"][0]["disposition"], "submitted")
@@ -1318,6 +1336,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
                     default_behavior=FakeBehavior(delay_seconds=1.1, text="done")
                 )
             },
+            authority=self.authority,
             lease_seconds=1,
             controller_lease_seconds=3,
         )
@@ -1336,7 +1355,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             with SQLiteStateStore(database) as store:
                 barrier.wait(timeout=5)
                 return store.claim_ready_dispatch(
-                    "run-1", controller=controller, lease_seconds=60
+                    "run-1", controller=controller, authority=self.authority, lease_seconds=60
                 )
 
         first, second = await asyncio.gather(
@@ -1364,7 +1383,7 @@ class SchedulerClosedLoopTests(unittest.IsolatedAsyncioTestCase):
             "run-1", "scheduler-1", lease_seconds=60
         )
         claim = self.store.claim_ready_dispatch(
-            "run-1", controller=first, lease_seconds=60
+            "run-1", controller=first, authority=self.authority, lease_seconds=60
         )
         adapter = FakeBackendAdapter(
             default_behavior=FakeBehavior(delay_seconds=1)

@@ -31,15 +31,17 @@ class AuthorityLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(token.owner_agent_id, "codex-supervisor-01")
         self.assertEqual(self.store.active_authority("run-1")["epoch"], 1)
 
-    async def test_acquire_authority_while_active_increments_epoch(self) -> None:
+    async def test_acquire_cannot_overwrite_active_authority(self) -> None:
         first = self.store.acquire_authority("run-1", "codex-supervisor-01", "supervisor")
         self.assertEqual(first.epoch, 1)
-        # 主管权转移：新 owner 接管时 epoch 递增，旧 token 失效
-        second = self.store.acquire_authority("run-1", "cb-supervisor-01", "supervisor")
-        self.assertEqual(second.epoch, 2)
-        self.assertEqual(self.store.active_authority("run-1")["owner_agent_id"], "cb-supervisor-01")
+        # P0-01：ACTIVE authority 不得被普通 acquire 无条件覆盖
         with self.assertRaises(FencedAuthorityError):
-            self.store.renew_authority(first)
+            self.store.acquire_authority("run-1", "cb-supervisor-01", "supervisor")
+        self.assertEqual(self.store.active_authority("run-1")["owner_agent_id"], "codex-supervisor-01")
+        self.assertEqual(self.store.active_authority("run-1")["epoch"], 1)
+        # 旧 token 仍有效（未被覆盖）
+        renewed = self.store.renew_authority(first)
+        self.assertEqual(renewed.epoch, 1)
 
     async def test_handoff_commits_atomically_and_old_epoch_is_fenced(self) -> None:
         token = self.store.acquire_authority("run-1", "codex-supervisor-01", "supervisor")
@@ -67,9 +69,10 @@ class AuthorityLeaseTests(unittest.IsolatedAsyncioTestCase):
         controller = self.store.acquire_run_controller("run-1", "op", lease_seconds=60)
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", controller,
+            authority=token,
             reason="review-passed",
         )
-        self.store.claim_merge_queue("run-1", controller)
+        self.store.claim_merge_queue("run-1", controller, authority=token)
         with self.assertRaises(RuntimeError):
             self.store.request_authority_handoff(
                 "run-1", token, "cb-supervisor-01", reason="mid-merge"
@@ -172,6 +175,9 @@ class BudgetDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store.create_task("run-1", "task-1")
         self.store.transition_task("task-1", TaskState.READY, reason="ready")
+        self.authority = self.store.acquire_authority(
+            "run-1", "codex-supervisor-01", "supervisor"
+        )
 
     async def asyncTearDown(self) -> None:
         self.store.close()
@@ -183,16 +189,22 @@ class BudgetDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_claim_stops_when_budget_exceeded(self) -> None:
         token = self._controller()
         self.store.record_budget("run-1", max_tasks=0)
-        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        claim = self.store.claim_ready_dispatch(
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
+        )
         self.assertIsNone(claim)
         # 提高预算后恢复派发
         self.store.record_budget("run-1", max_tasks=10)
-        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        claim = self.store.claim_ready_dispatch(
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
+        )
         self.assertIsNotNone(claim)
 
     async def test_claim_normal_without_budget(self) -> None:
         token = self._controller()
-        claim = self.store.claim_ready_dispatch("run-1", controller=token, lease_seconds=60)
+        claim = self.store.claim_ready_dispatch(
+            "run-1", controller=token, authority=self.authority, lease_seconds=60
+        )
         self.assertIsNotNone(claim)
 
 
@@ -236,7 +248,16 @@ class ReviewLayerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_review_decision_fenced_by_stale_authority(self) -> None:
         authority = self._authority()
-        second = self.store.acquire_authority("run-1", "cb-supervisor-01", "supervisor")
+        # 经 handoff 切到新主管，旧 token 失效（P0-01 后普通 acquire 无法覆盖 ACTIVE）
+        request = self.store.request_authority_handoff(
+            "run-1", authority, "cb-supervisor-01", reason="rotate"
+        )
+        self.store.accept_authority_handoff(
+            "run-1", request["request_id"], "cb-supervisor-01"
+        )
+        self.store.commit_authority_handoff(
+            "run-1", request["request_id"], "cb-supervisor-01"
+        )
         with self.assertRaises(Exception):
             self.store.record_review_decision(
                 "run-1", "task-1", attempt_id="attempt-1", layer="human",

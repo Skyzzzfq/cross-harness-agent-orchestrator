@@ -13,7 +13,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 |---|---|---|---|
 | 阶段 0：可行性闸门 | GO | SPIKE_REPORT.md、ACCOUNT_BOUNDARIES.md | 是 |
 | 阶段 1：PoC | PASS | STAGE1_REPORT.md、真实三连跑历史 | 是 |
-| 阶段 2：MVP | AUDIT-OPEN | 150 项组件测试、schema v12、审计与对账报告 | **否** |
+| 阶段 2：MVP | AUDIT-OPEN | 160 项组件测试、schema v12、审计与对账报告 | **否** |
 | 阶段 3：Beta | 未开始 | 无 | 否 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现。WorkBuddy 已在 STAGE2_AUDIT_RESPONSE.md 中确认全部 3 项 P0、6 项 P1 和 4 项文档问题成立，因此原签字已撤销。
@@ -21,7 +21,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 ## 2. 已验证基线
 
 - 当前远端和本地基线：87b875e，提交说明为 stage2: checkpoint audit findings and workbuddy response。
-- 全量测试：150/150 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
+- 全量测试：160/160 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW，且 2 CodeBuddy + 1 Codex 存在真实并行重叠。
@@ -45,45 +45,47 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 ## 4. 当前未修复漏洞
 
 权威详情：STAGE2_AUDIT_FINDINGS.md。WorkBuddy 对账：STAGE2_AUDIT_RESPONSE.md。
+> 产品口径（2026-09-01 用户决策）：MVP 只要求【MVP 必需】项关闭并重新签字；【Beta 再补】项在阶段 3 内完成，不阻塞阶段 2 签字。审计清单本身不可改写。
 
-### P0
+### P0（全部 MVP 必需）
 
-- [ ] P0-01：AuthorityToken 接入派发、审核、Merge 入队/领取/完成；禁止无条件接管 ACTIVE authority。
-- [ ] P0-03：canonical cwd、受管 worktree、Windows 安全 write_scope 和固定证书缓存根。
-- [ ] P0-02：Merge Queue、真实 Git、数据库状态与 Transactional Outbox 的可恢复闭环。
+- [x] P0-01 【MVP 必需】AuthorityToken 接入派发、审核、Merge 入队/领取/完成；禁止无条件接管 ACTIVE authority。
+  - `claim_ready_dispatch`/`reconcile_task_graph`/`enqueue_merge`/`claim_merge_queue`/`finish_merge` 增加必填 `authority` 参数并在事务内 `_ensure_authority_tx` 原子 fencing；`reconcile_merge_with_git` 可选 fencing。
+  - `scheduler_tick`/`serve` 透传 authority；serve 启动 acquire + 后台续租 authority，失权返回 `lost-controller`。
+  - `acquire_authority` 已有 ACTIVE 未过期时拒绝普通覆盖；新增 `force_takeover_authority`（人工 APPROVED 审批 + 单次使用消费 + `authority.takeover_forced` 审计）。
+  - 新增 10 项测试：旧 epoch 派发/入队/领取/完成零副作用、新主管正常派发、acquire 拒覆盖、过期接管、force takeover 审批/消费/scope 校验/旧 epoch fencing。
+- [ ] P0-03 【MVP 必需】canonical cwd、受管 worktree、Windows 安全 write_scope 和固定证书缓存根。
+- [ ] P0-02 【MVP 必需】Merge Queue、真实 Git、数据库状态与 Transactional Outbox 的可恢复闭环。
 
 ### P1
 
-- [ ] P1-01：修正 REVIEW 被当作 terminal 的统计，并重跑完整真实终态矩阵。
-- [ ] P1-02：补齐 turn、Token、金额预算和并发预算预留。
-- [ ] P1-03：审批 scope/params/expiry/single-use 原子消费，并实现重新分配。
-- [ ] P1-04：真实写 Adapter 接入受管 worktree 和常驻 Scheduler。
-- [ ] P1-05：超时/取消不确定性、Session 隔离和持久化前统一脱敏。
-- [ ] P1-06：Outbox 持久 claim、退避重试和死信处理。
+- [ ] P1-01 【MVP 必需】修正 REVIEW 被当作 terminal 的统计，并重跑完整真实终态矩阵。
+- [ ] P1-04 【MVP 必需】真实写 Adapter 接入受管 worktree 和常驻 Scheduler。
+- [ ] P1-05 【MVP 必需】超时/取消不确定性、Session 隔离和持久化前统一脱敏（安全相关）。
+- [ ] P1-02 【Beta 再补】补齐 turn、Token、金额预算和并发预算预留（calls/tasks/时间预算已够 MVP；金额预算需权威 usage）。
+- [ ] P1-03 【Beta 再补】审批 scope/params/expiry/single-use 原子消费，并实现重新分配（记录型审批已够 MVP，消费增强进 Beta）。
+- [ ] P1-06 【Beta 再补】Outbox 持久 claim、退避重试和死信处理（MVP 已有 Outbox 表与投递，重试增强进 Beta）。
 
 ## 5. 修复顺序
 
-不得跳过前项门禁：
+不得跳过前项门禁；先修 MVP 必需项，Beta 再补项在阶段 3 内处理：
 
-1. stage2: checkpoint enforce authority and takeover fencing
-2. stage2: checkpoint canonical workspace and write scopes
-3. stage2: checkpoint transactional merge git and outbox
-4. stage2: checkpoint approval and complete budget gates
-5. stage2: checkpoint real writable scheduler and cancellation
-6. stage2: checkpoint corrected exit matrix and handoff records
-7. 所有退出条件重新通过后，再创建新的 stage2: complete 提交。
+1. stage2: checkpoint enforce authority and takeover fencing（P0-01，✅ 已完成）
+2. stage2: checkpoint canonical workspace and write scopes（P0-03）
+3. stage2: checkpoint transactional merge git and outbox（P0-02）
+4. stage2: checkpoint real writable scheduler and cancellation（P1-04 + P1-05）
+5. stage2: checkpoint corrected exit matrix and handoff records（P1-01，重跑矩阵）
+6. 所有 MVP 必需项关闭并重新验收后，创建新的 stage2: complete 提交（Beta 再补项 P1-02/P1-03/P1-06 转入阶段 3 继续）。
 
 每次行为变化必须先补失败测试并运行全量测试；每个切片同时更新本文和 STAGE2_REPORT.md。
 
-## 6. 重新签字 Stage 2 的最低条件
+## 6. 重新签字 Stage 2 的最低条件（MVP 必需项）
 
-- 所有 P0、P1 关闭并有回归测试。
+- 所有【MVP 必需】的 P0/P1 关闭并有回归测试；【Beta 再补】项作为阶段 3 内的遗留任务台账保留，不阻塞签字。
 - 旧 authority epoch 对派发、审核和集成均为零副作用。
 - cwd/write_scope 不允许项目外访问或 Windows 路径别名绕过。
 - Git、数据库、Outbox 在所有关键崩溃点最终一致，0 虚假 COMPLETED、0 重复 merge。
 - 真实任务经过 review、approval、integration 到达真实终态，不能只停在 REVIEW。
-- turn、Token、金额和其他硬预算达到上限后零新增调用。
-- 一次性审批只能被指定 Task / Attempt / 参数消费一次。
 - 常驻服务能运行真实 Codex / 中国站 CodeBuddy；写任务只进入受管 worktree。
 - 更新 STAGE2_REPORT.md，并提供真实报告、数据库完整性、Git 对账和失败注入矩阵。
 

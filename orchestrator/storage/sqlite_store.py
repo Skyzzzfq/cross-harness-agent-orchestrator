@@ -838,11 +838,14 @@ class SQLiteStateStore:
         run_id: str,
         *,
         controller: ControllerToken,
+        authority: AuthorityToken,
         lease_seconds: int = 60,
         now: str | None = None,
     ) -> AdapterCallRequest | None:
         if controller.run_id != run_id:
             raise FencedControllerError("controller token belongs to another Run")
+        if authority.run_id != run_id:
+            raise FencedAuthorityError("authority token belongs to another Run")
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be at least 1")
         as_of = self._aware_datetime(now)
@@ -850,6 +853,7 @@ class SQLiteStateStore:
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self._ensure_controller_tx(controller, now_value)
+            self._ensure_authority_tx(authority, now_value)
             budget = self.budget_status(run_id)
             if budget.get("exceeded"):
                 # 硬预算达到上限：零新增调用，停止派发。
@@ -1503,6 +1507,7 @@ class SQLiteStateStore:
         base_commit: str,
         controller: ControllerToken,
         *,
+        authority: AuthorityToken,
         reason: str,
     ) -> str:
         if not result_commit.strip() or not base_commit.strip():
@@ -1513,8 +1518,11 @@ class SQLiteStateStore:
             self.connection.execute("BEGIN IMMEDIATE")
             now = self._aware_datetime(None).isoformat()
             self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
             if controller.run_id != run_id:
                 raise FencedControllerError("controller token belongs to another Run")
+            if authority.run_id != run_id:
+                raise FencedAuthorityError("authority token belongs to another Run")
             merge_id = f"merge-{uuid.uuid4().hex[:16]}"
             idempotency_key = f"{run_id}:{task_id}:{attempt_id}"
             self.connection.execute(
@@ -1556,14 +1564,17 @@ class SQLiteStateStore:
             raise
 
     def claim_merge_queue(
-        self, run_id: str, controller: ControllerToken
+        self, run_id: str, controller: ControllerToken, *, authority: AuthorityToken
     ) -> dict[str, Any] | None:
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             now = self._aware_datetime(None).isoformat()
             self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
             if controller.run_id != run_id:
                 raise FencedControllerError("controller token belongs to another Run")
+            if authority.run_id != run_id:
+                raise FencedAuthorityError("authority token belongs to another Run")
             row = self.connection.execute(
                 """
                 SELECT merge_id, task_id, attempt_id, result_commit, base_commit
@@ -1612,6 +1623,7 @@ class SQLiteStateStore:
         status: str,
         controller: ControllerToken,
         *,
+        authority: AuthorityToken,
         result_commit: str | None = None,
         issue_kind: str | None = None,
         issue_detail: dict[str, Any] | None = None,
@@ -1622,6 +1634,7 @@ class SQLiteStateStore:
             self.connection.execute("BEGIN IMMEDIATE")
             now = self._aware_datetime(None).isoformat()
             self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
             row = self.connection.execute(
                 """
                 SELECT m.run_id, m.task_id, m.attempt_id, m.status, m.claim_owner,
@@ -1741,6 +1754,8 @@ class SQLiteStateStore:
         run_id: str,
         controller: ControllerToken,
         is_applied: Any,
+        *,
+        authority: AuthorityToken | None = None,
     ) -> dict[str, Any]:
         """Reconcile APPLYING merges against the real integration branch.
 
@@ -1748,6 +1763,9 @@ class SQLiteStateStore:
         landed on the integration branch (e.g. via commit trailer / ancestor
         check). Already-applied merges are marked APPLIED and never re-applied;
         the rest are safely requeued as PENDING for one retry.
+
+        ``authority`` is optional for backward compatibility during migration;
+        when provided it is atomically fenced before any merge state changes.
         """
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -1755,6 +1773,8 @@ class SQLiteStateStore:
             self._ensure_controller_tx(controller, now)
             if controller.run_id != run_id:
                 raise FencedControllerError("controller token belongs to another Run")
+            if authority is not None:
+                self._ensure_authority_tx(authority, now)
             rows = self.connection.execute(
                 """
                 SELECT merge_id, task_id, attempt_id, result_commit
@@ -1844,7 +1864,15 @@ class SQLiteStateStore:
                     ),
                 )
             else:
-                # 每 Run 一行：接管时更新同一行并递增 epoch，旧 epoch 立即失效。
+                # 每 Run 一行：已有 ACTIVE 且未过期时不得被普通 acquire 无条件覆盖
+                # （强制接管必须走 force_takeover_authority 的人工审批流程）；
+                # 只有旧租约已过期才允许在此接管恢复。
+                if row["state"] == "ACTIVE" and str(row["expires_at"]) > now:
+                    raise FencedAuthorityError(
+                        "active authority is held by another supervisor; "
+                        "use force_takeover_authority with human approval"
+                    )
+                # 接管：更新同一行并递增 epoch，旧 epoch 立即失效。
                 epoch = int(row["epoch"]) + 1
                 self.connection.execute(
                     """
@@ -2095,6 +2123,132 @@ class SQLiteStateStore:
             return AuthorityToken(
                 run_id=run_id,
                 owner_agent_id=target_agent_id,
+                role_id=role_id,
+                epoch=epoch,
+                expires_at=expires_at,
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def force_takeover_authority(
+        self,
+        run_id: str,
+        owner_agent_id: str,
+        role_id: str,
+        *,
+        requested_by: str,
+        approval_request_id: str,
+        lease_seconds: int = 300,
+        scope: str = "supervisor",
+    ) -> AuthorityToken:
+        """人工审批的强制接管。
+
+        仅在提供已批准（APPROVED）、作用域匹配、单次使用的审批单时允许
+        无条件接管 ACTIVE authority；审批单被原子消费为 USED，并记录
+        authority.takeover_forced 审计事件。旧 epoch 立即失效。
+        """
+        if not owner_agent_id.strip() or not role_id.strip():
+            raise ValueError("owner_agent_id and role_id must not be empty")
+        if not requested_by.strip() or not approval_request_id.strip():
+            raise ValueError("requested_by and approval_request_id must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            as_of = self._aware_datetime(None)
+            now = as_of.isoformat()
+            expires_at = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+            approval = self.connection.execute(
+                """
+                SELECT run_id, scope, single_use, status, expires_at
+                FROM approval_requests WHERE request_id = ?
+                """,
+                (approval_request_id,),
+            ).fetchone()
+            if approval is None:
+                raise RuntimeError("approval request does not exist")
+            if str(approval["run_id"]) != run_id:
+                raise RuntimeError("approval request belongs to another Run")
+            if approval["status"] != "APPROVED":
+                raise RuntimeError("approval request is not APPROVED")
+            if approval["scope"] != scope:
+                raise RuntimeError(
+                    f"approval scope {approval['scope']!r} does not match takeover scope {scope!r}"
+                )
+            if approval["expires_at"] is not None and str(
+                approval["expires_at"]
+            ) <= now:
+                raise RuntimeError("approval request has expired")
+            # 原子消费审批：APPROVED → USED（单次使用语义）
+            self.connection.execute(
+                """
+                UPDATE approval_requests SET status = 'USED'
+                WHERE request_id = ? AND status = 'APPROVED'
+                """,
+                (approval_request_id,),
+            )
+            row = self.connection.execute(
+                "SELECT epoch FROM authority_leases WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                epoch = 1
+                self.connection.execute(
+                    """
+                    INSERT INTO authority_leases(
+                        lease_id, run_id, owner_agent_id, role_id, scope, epoch,
+                        state, acquired_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                    """,
+                    (
+                        f"authority-{uuid.uuid4().hex[:16]}",
+                        run_id,
+                        owner_agent_id,
+                        role_id,
+                        scope,
+                        epoch,
+                        now,
+                        expires_at,
+                    ),
+                )
+            else:
+                epoch = int(row["epoch"]) + 1
+                self.connection.execute(
+                    """
+                    UPDATE authority_leases
+                    SET owner_agent_id = ?, role_id = ?, scope = ?, epoch = ?,
+                        state = 'ACTIVE', acquired_at = ?, expires_at = ?,
+                        handoff_state = NULL, handoff_target_agent_id = NULL,
+                        ended_at = NULL, end_reason = 'force-takeover'
+                    WHERE run_id = ?
+                    """,
+                    (
+                        owner_agent_id,
+                        role_id,
+                        scope,
+                        epoch,
+                        now,
+                        expires_at,
+                        run_id,
+                    ),
+                )
+            self._append_event(
+                run_id,
+                None,
+                None,
+                "authority.takeover_forced",
+                None,
+                "ACTIVE",
+                {
+                    "owner_agent_id": owner_agent_id,
+                    "role_id": role_id,
+                    "epoch": epoch,
+                    "requested_by": requested_by,
+                    "approval_request_id": approval_request_id,
+                },
+            )
+            self.connection.commit()
+            return AuthorityToken(
+                run_id=run_id,
+                owner_agent_id=owner_agent_id,
                 role_id=role_id,
                 epoch=epoch,
                 expires_at=expires_at,
@@ -3821,12 +3975,14 @@ class SQLiteStateStore:
         run_id: str,
         *,
         controller: ControllerToken,
+        authority: AuthorityToken,
         now: str | None = None,
     ) -> dict[str, int]:
         now_value = self._aware_datetime(now).isoformat()
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             self._ensure_controller_tx(controller, now_value)
+            self._ensure_authority_tx(authority, now_value)
             if controller.run_id != run_id:
                 raise FencedControllerError("controller token belongs to another Run")
             result = self._reconcile_task_graph_tx(run_id, now_value)
