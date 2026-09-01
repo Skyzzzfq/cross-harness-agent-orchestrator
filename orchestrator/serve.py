@@ -25,6 +25,8 @@ async def serve(
     team_spec: TeamSpec | None = None,
     *,
     authority: AuthorityToken | None = None,
+    git_manager: Any | None = None,
+    outbox_deliver: Any | None = None,
     interval: float = 1.0,
     controller_lease_seconds: int = 300,
     stop_event: asyncio.Event | None = None,
@@ -35,8 +37,10 @@ async def serve(
     The loop holds the Run controller lease and the business AuthorityLease for
     its whole lifetime, renewing both in the background, and exits (releasing
     them) when it loses ownership. Each cycle reclaims expired assignment
-    leases, dispatches ready tasks, sweeps cancel requests, and reconciles
-    agent pools to the configured target count. The loop stops cleanly on
+    leases, dispatches ready tasks, sweeps cancel requests, reconciles agent
+    pools, and—when a ``git_manager`` is provided—consumes the persistent
+    Merge Queue and Transactional Outbox with real Git integration and the
+    optional ``outbox_deliver`` hook. The loop stops cleanly on
     ``stop_event`` or after ``max_ticks`` cycles.
     """
     if interval <= 0:
@@ -76,6 +80,18 @@ async def serve(
         store.release_run_controller(token)
         raise FencedAuthorityError("authority token belongs to another Run")
 
+    # P0-02：常驻循环可选消费 Merge Queue 与 Outbox（提供 git_manager 时启用）
+    merge_executor = None
+    outbox_dispatcher = None
+    if git_manager is not None:
+        from orchestrator.workspace.merge_executor import (
+            MergeExecutor,
+            OutboxDispatcher,
+        )
+
+        merge_executor = MergeExecutor(store, git_manager)
+        outbox_dispatcher = OutboxDispatcher(store, deliver=outbox_deliver)
+
     heartbeat_stop = asyncio.Event()
 
     async def renew_controller() -> None:
@@ -113,6 +129,13 @@ async def serve(
                     controller=token,
                     controller_lease_seconds=controller_lease_seconds,
                 )
+                # P0-02：常驻循环消费 Merge Queue 与 Transactional Outbox
+                if merge_executor is not None:
+                    merge_executor.run_merge_once(
+                        run_id, token, authority_token
+                    )
+                if outbox_dispatcher is not None:
+                    outbox_dispatcher.run_once(run_id, token, authority_token)
                 if team_spec is not None:
                     for pool in team_spec.agent_pools:
                         reconcile_pool_once(store, run_id, pool)

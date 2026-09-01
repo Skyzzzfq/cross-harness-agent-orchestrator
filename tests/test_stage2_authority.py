@@ -66,6 +66,19 @@ class AuthorityLeaseTests(unittest.IsolatedAsyncioTestCase):
         token = self.store.acquire_authority("run-1", "codex-supervisor-01", "supervisor")
         # 制造活动 merge（APPLYING）
         self.store.create_task("run-1", "task-1")
+        self.store.transition_task("task-1", TaskState.READY, reason="ready")
+        self.store.transition_task("task-1", TaskState.ACTIVE, reason="assigned")
+        self.store.transition_task("task-1", TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES ('attempt-1', 'task-1', 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        self.store.connection.commit()
         controller = self.store.acquire_run_controller("run-1", "op", lease_seconds=60)
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", controller,

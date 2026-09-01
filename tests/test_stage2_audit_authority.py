@@ -101,6 +101,19 @@ class AuthorityDispatchFencingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_authority_cannot_claim_merge(self) -> None:
         self.store.create_task("run-1", "task-1")
+        self.store.transition_task("task-1", TaskState.READY, reason="ready")
+        self.store.transition_task("task-1", TaskState.ACTIVE, reason="dispatch")
+        self.store.transition_task("task-1", TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES ('attempt-1', 'task-1', 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        self.store.connection.commit()
         self.store.enqueue_merge(
             "run-1",
             "task-1",
@@ -125,6 +138,16 @@ class AuthorityDispatchFencingTests(unittest.IsolatedAsyncioTestCase):
         self.store.transition_task("task-1", TaskState.READY, reason="ready")
         self.store.transition_task("task-1", TaskState.ACTIVE, reason="dispatch")
         self.store.transition_task("task-1", TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES ('attempt-1', 'task-1', 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        self.store.connection.commit()
         self.store.enqueue_merge(
             "run-1",
             "task-1",
@@ -146,6 +169,7 @@ class AuthorityDispatchFencingTests(unittest.IsolatedAsyncioTestCase):
                 self.controller,
                 authority=self.authority,  # 旧 epoch
                 result_commit="abc123",
+                is_integrated=lambda commit: True,
             )
         self.assertEqual(self.store.task_state("task-1"), TaskState.REVIEW)
         row = self.store.connection.execute(

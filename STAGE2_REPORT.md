@@ -11,7 +11,7 @@
 
 ## 2. 当前可信验证
 
-- 170 项单元、契约和 Fake 集成测试通过。
+- 183 项单元、契约和 Fake 集成测试通过。
 - 实际数据库 schema v12，integrity_check=ok，foreign_key_check=0。
 - 真实 10 个只读 Adapter 场景均成功到达 REVIEW 并匹配 marker。
 - 2 CodeBuddy + 1 Codex 真实调用存在时间重叠。
@@ -44,7 +44,7 @@
 
 1. ~~AuthorityLease 没有约束真实派发和集成，ACTIVE authority 可被无条件覆盖。~~ **已修复（本轮）**：派发/审核/入队/领取/完成集成全部接入 `AuthorityToken` 原子 fencing；`acquire_authority` 拒绝覆盖 ACTIVE；新增人工审批的 `force_takeover_authority`。详见 `PROJECT_PROGRESS.md` P0-01。
 2. ~~cwd/write_scope 缺少 canonical 项目边界，Windows 下存在越界访问和写入风险。~~ **已修复（本轮）**：`WorkspacePolicy`（受管 worktree + project_root）在 Task 创建与派发两个边界校验 cwd；write_scope 强制非空/相对/无 `..`/`.git`/symlink 逃逸，冲突检测大小写不敏感且目录包含子路径；证书缓存固定到用户级 `.agent-hub/certs`，不随任务 cwd 变化。详见 `PROJECT_PROGRESS.md` P0-03。
-3. Merge Queue、Git、Task COMPLETED 和 Outbox 不在可恢复的一致性闭环中。
+3. ~~Merge Queue、Git、Task COMPLETED 和 Outbox 不在可恢复的一致性闭环中。~~ **已修复（本轮）**：`enqueue_merge` 入队前原子验证 Task REVIEW + Attempt 存在；`finish_merge` 严格 APPLYING + 必须提供 `is_integrated` Git 对账证明 + 同事务写 Outbox intent；新增 `MergeExecutor`/`OutboxDispatcher` 供常驻循环消费（真实 `GitWorkspaceManager.integrate`，崩溃后 `reconcile_once` 0 重复 merge）。详见 `PROJECT_PROGRESS.md` P0-02。
 
 ### P1
 

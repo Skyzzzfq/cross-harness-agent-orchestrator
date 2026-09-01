@@ -112,16 +112,27 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
     def _controller(self) -> object:
         return self.store.acquire_run_controller("run-1", "operator", lease_seconds=60)
 
-    def _reviewed_task(self, task_id: str) -> None:
+    def _reviewed_task(self, task_id: str, attempt_id: str = "attempt-1") -> None:
         self.store.create_task("run-1", task_id)
         self.store.transition_task(task_id, TaskState.READY, reason="ready")
         self.store.transition_task(task_id, TaskState.ACTIVE, reason="assigned")
         self.store.transition_task(task_id, TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES (?, ?, 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """,
+            (attempt_id, task_id),
+        )
+        self.store.connection.commit()
 
     async def test_enqueue_and_claim_merge_is_atomic(self) -> None:
         token = self._controller()
-        self.store.create_task("run-1", "task-1")
-        self.store.create_task("run-1", "task-2")
+        self._reviewed_task("task-1", "attempt-1")
+        self._reviewed_task("task-2", "attempt-2")
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", token,
             authority=self.authority, reason="review-passed",
@@ -144,12 +155,12 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
             authority=self.authority, reason="review-passed",
         )
         claim = self.store.claim_merge_queue("run-1", token, authority=self.authority)
-        self.store.record_outbox_intent(
-            "run-1", "merge", claim["merge_id"], "merge.applied", {"commit": "abc123"}, token
-        )
+        # P0-02：merge 业务与 Outbox intent 同一事务
         self.store.finish_merge(
             claim["merge_id"], "applied", token,
             authority=self.authority, result_commit="abc123",
+            is_integrated=lambda commit: True,
+            outbox_payload={"commit": "abc123"},
         )
         self.assertEqual(self.store.task_state("task-1"), TaskState.COMPLETED)
         outbox = self.store.connection.execute(
@@ -182,7 +193,7 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_merge_reconcile_does_not_duplicate_applied_merge(self) -> None:
         token = self._controller()
-        self.store.create_task("run-1", "task-1")
+        self._reviewed_task("task-1")
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", token,
             authority=self.authority, reason="review-passed",
@@ -191,6 +202,7 @@ class MergeQueueOutboxTests(unittest.IsolatedAsyncioTestCase):
         self.store.finish_merge(
             claim["merge_id"], "applied", token,
             authority=self.authority, result_commit="abc123",
+            is_integrated=lambda commit: True,
         )
         # 重启后对账：已 APPLIED 的记录不应被再次 claim 或 apply
         reconciled = self.store.reconcile_merge_queue("run-1", token)

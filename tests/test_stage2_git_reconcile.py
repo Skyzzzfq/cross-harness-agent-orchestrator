@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from orchestrator.core.models import TaskState
 from orchestrator.storage.sqlite_store import SQLiteStateStore
 from orchestrator.workspace.git_manager import GitWorkspaceManager
 
@@ -95,9 +96,26 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
     def _controller(self) -> object:
         return self.store.acquire_run_controller("run-1", "operator", lease_seconds=60)
 
+    def _reviewed_task(self, task_id: str = "task-1", attempt_id: str = "attempt-1") -> None:
+        self.store.create_task("run-1", task_id)
+        self.store.transition_task(task_id, TaskState.READY, reason="ready")
+        self.store.transition_task(task_id, TaskState.ACTIVE, reason="assigned")
+        self.store.transition_task(task_id, TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES (?, ?, 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """,
+            (attempt_id, task_id),
+        )
+        self.store.connection.commit()
+
     async def test_already_applied_merge_is_marked_applied_not_reapplied(self) -> None:
         token = self._controller()
-        self.store.create_task("run-1", "task-1")
+        self._reviewed_task()
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", token,
             authority=self.authority, reason="review-passed",
@@ -116,7 +134,7 @@ class GitMergeReconcileTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unapplied_merge_is_requeued_for_retry(self) -> None:
         token = self._controller()
-        self.store.create_task("run-1", "task-1")
+        self._reviewed_task()
         self.store.enqueue_merge(
             "run-1", "task-1", "attempt-1", "abc123", "base0", token,
             authority=self.authority, reason="review-passed",
@@ -141,6 +159,19 @@ class KillRestartMergeTests(unittest.TestCase):
         self.store = SQLiteStateStore(root / "state.db")
         self.store.create_run("run-1", "team-1")
         self.store.create_task("run-1", "task-1")
+        self.store.transition_task("task-1", TaskState.READY, reason="ready")
+        self.store.transition_task("task-1", TaskState.ACTIVE, reason="assigned")
+        self.store.transition_task("task-1", TaskState.REVIEW, reason="submitted")
+        self.store.connection.execute(
+            """
+            INSERT INTO attempts(
+                attempt_id, task_id, agent_id, state, attempt_number,
+                generation, created_at, updated_at
+            ) VALUES ('attempt-1', 'task-1', 'ag-1', 'SUBMITTED', 1, 1,
+                      '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """
+        )
+        self.store.connection.commit()
         self.authority = self.store.acquire_authority(
             "run-1", "test-supervisor", "supervisor"
         )

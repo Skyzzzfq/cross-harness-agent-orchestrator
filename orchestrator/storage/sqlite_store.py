@@ -1544,6 +1544,31 @@ class SQLiteStateStore:
                 raise FencedControllerError("controller token belongs to another Run")
             if authority.run_id != run_id:
                 raise FencedAuthorityError("authority token belongs to another Run")
+            # P0-02：入队前原子验证 Task 处于 REVIEW、Attempt 存在且非终态
+            task_row = self.connection.execute(
+                "SELECT state FROM tasks WHERE task_id = ? AND run_id = ?",
+                (task_id, run_id),
+            ).fetchone()
+            if task_row is None:
+                raise ValueError(f"task {task_id} does not exist")
+            if task_row["state"] != TaskState.REVIEW.value:
+                raise ValueError(
+                    f"task {task_id} is {task_row['state']}, must be REVIEW to enqueue merge"
+                )
+            attempt_row = self.connection.execute(
+                "SELECT state FROM attempts WHERE attempt_id = ? AND task_id = ?",
+                (attempt_id, task_id),
+            ).fetchone()
+            if attempt_row is None:
+                raise ValueError(f"attempt {attempt_id} does not exist for task {task_id}")
+            if attempt_row["state"] in {
+                AttemptState.CANCELLED.value,
+                AttemptState.FAILED.value,
+                AttemptState.STALE.value,
+            }:
+                raise ValueError(
+                    f"attempt {attempt_id} is terminal ({attempt_row['state']}), cannot merge"
+                )
             merge_id = f"merge-{uuid.uuid4().hex[:16]}"
             idempotency_key = f"{run_id}:{task_id}:{attempt_id}"
             self.connection.execute(
@@ -1646,11 +1671,21 @@ class SQLiteStateStore:
         *,
         authority: AuthorityToken,
         result_commit: str | None = None,
+        is_integrated: Any | None = None,
+        outbox_payload: dict[str, Any] | None = None,
         issue_kind: str | None = None,
         issue_detail: dict[str, Any] | None = None,
     ) -> None:
         if status not in {"applied", "conflict", "failed"}:
             raise ValueError(f"unsupported merge status: {status}")
+        if status == "applied":
+            if result_commit is None:
+                raise ValueError("applied merge requires result_commit")
+            if is_integrated is None:
+                raise ValueError(
+                    "applied merge requires is_integrated(result_commit) proof "
+                    "that the commit landed on the integration branch"
+                )
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             now = self._aware_datetime(None).isoformat()
@@ -1659,6 +1694,7 @@ class SQLiteStateStore:
             row = self.connection.execute(
                 """
                 SELECT m.run_id, m.task_id, m.attempt_id, m.status, m.claim_owner,
+                       m.result_commit,
                        t.state AS task_state
                 FROM merge_queue m JOIN tasks t ON t.task_id = m.task_id
                 WHERE m.merge_id = ?
@@ -1673,23 +1709,64 @@ class SQLiteStateStore:
                 raise FencedControllerError(
                     "merge was claimed by a different controller owner"
                 )
+            # P0-02：严格 APPLYING 前置——重复调用（已 APPLIED/CONFLICT/FAILED）零副作用
+            if row["status"] != "APPLYING":
+                raise RuntimeError(
+                    f"merge {merge_id} is {row['status']}, not APPLYING; refusing to re-settle"
+                )
             run_id = str(row["run_id"])
             task_id = str(row["task_id"])
             attempt_id = str(row["attempt_id"])
+            if status == "applied":
+                # P0-02：Git 对账证明——result commit 必须已落集成分支
+                stored_commit = str(row["result_commit"] or "")
+                proof_commit = result_commit or stored_commit
+                try:
+                    landed = bool(is_integrated(proof_commit))
+                except Exception:
+                    landed = False
+                if not landed:
+                    raise ValueError(
+                        f"result commit {proof_commit} is not integrated on the branch; "
+                        "refusing to mark merge APPLIED"
+                    )
             target = {
                 "applied": "APPLIED",
                 "conflict": "CONFLICT",
                 "failed": "FAILED",
             }[status]
-            self.connection.execute(
+            updated = self.connection.execute(
                 """
                 UPDATE merge_queue
                 SET status = ?, settled_at = ?
-                WHERE merge_id = ? AND claim_owner = ?
+                WHERE merge_id = ? AND claim_owner = ? AND status = 'APPLYING'
                 """,
                 (target, now, merge_id, controller.owner_id),
-            )
+            ).rowcount
+            if updated == 0:
+                raise RuntimeError(
+                    f"merge {merge_id} was not in APPLYING state; refusing to re-settle"
+                )
             if status == "applied":
+                if outbox_payload is not None:
+                    # P0-02：merge 业务状态与 Outbox intent 同一事务
+                    outbox_id = f"outbox-{uuid.uuid4().hex[:16]}"
+                    self.connection.execute(
+                        """
+                        INSERT INTO outbox(
+                            outbox_id, run_id, aggregate_type, aggregate_id,
+                            event_type, payload_json, status, available_at, created_at
+                        ) VALUES (?, ?, 'merge', ?, 'merge.applied', ?, 'PENDING', ?, ?)
+                        """,
+                        (
+                            outbox_id,
+                            run_id,
+                            merge_id,
+                            json.dumps(outbox_payload),
+                            now,
+                            now,
+                        ),
+                    )
                 if row["task_state"] == TaskState.REVIEW.value:
                     self._transition_task_tx(
                         task_id, TaskState.INTEGRATION, "merge-applied", now
