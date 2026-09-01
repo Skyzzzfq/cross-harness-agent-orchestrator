@@ -13,7 +13,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 |---|---|---|---|
 | 阶段 0：可行性闸门 | GO | SPIKE_REPORT.md、ACCOUNT_BOUNDARIES.md | 是 |
 | 阶段 1：PoC | PASS | STAGE1_REPORT.md、真实三连跑历史 | 是 |
-| 阶段 2：MVP | AUDIT-OPEN | 160 项组件测试、schema v12、审计与对账报告 | **否** |
+| 阶段 2：MVP | AUDIT-OPEN | 170 项组件测试、schema v12、审计与对账报告 | **否** |
 | 阶段 3：Beta | 未开始 | 无 | 否 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现。WorkBuddy 已在 STAGE2_AUDIT_RESPONSE.md 中确认全部 3 项 P0、6 项 P1 和 4 项文档问题成立，因此原签字已撤销。
@@ -21,7 +21,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 ## 2. 已验证基线
 
 - 当前远端和本地基线：87b875e，提交说明为 stage2: checkpoint audit findings and workbuddy response。
-- 全量测试：160/160 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
+- 全量测试：170/170 通过；这些测试证明已有组件行为，不代表 Stage 2 退出门禁已通过。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW，且 2 CodeBuddy + 1 Codex 存在真实并行重叠。
@@ -54,7 +54,11 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
   - `scheduler_tick`/`serve` 透传 authority；serve 启动 acquire + 后台续租 authority，失权返回 `lost-controller`。
   - `acquire_authority` 已有 ACTIVE 未过期时拒绝普通覆盖；新增 `force_takeover_authority`（人工 APPROVED 审批 + 单次使用消费 + `authority.takeover_forced` 审计）。
   - 新增 10 项测试：旧 epoch 派发/入队/领取/完成零副作用、新主管正常派发、acquire 拒覆盖、过期接管、force takeover 审批/消费/scope 校验/旧 epoch fencing。
-- [ ] P0-03 【MVP 必需】canonical cwd、受管 worktree、Windows 安全 write_scope 和固定证书缓存根。
+- [x] P0-03 【MVP 必需】canonical cwd、受管 worktree、Windows 安全 write_scope 和固定证书缓存根。
+  - 新增 `orchestrator/workspace/policy.py`：`WorkspacePolicy`（project_root/受管 worktree 注册）+ `validate_cwd`（写任务必须落在受管 worktree、只读限项目根）+ `validate_write_scope`（非空/相对/无 `..`/绝对/`.git`/symlink 逃逸）+ `scopes_conflict`（大小写不敏感 + 目录包含子路径）。
+  - `SQLiteStateStore` 可选注入 `workspace_policy`；`create_task`/`create_task_graph` 两个边界做 cwd 与 write_scope 校验（无 policy 时 write 任务仍强制 write_scope 静态校验，read 禁止声明 write_scope）；`claim_ready_dispatch` 派发边界对每个候选校验 cwd，非法保守跳过。
+  - 证书缓存固定：`platform.codex_transport_environment` 不再写入任务 cwd，固定到 `AGENT_HUB_CERTS_ROOT`（默认用户级 `.agent-hub/certs`）。
+  - 新增 10 项测试：canonical 大小写/`..` 消解、write_scope 非空/`..`/绝对/`.git`/symlink 逃逸、目录包含冲突、大小写冲突、Task 创建空/`..` scope 拒绝、项目外 cwd 拒绝（write 与 read）、证书根不随 cwd 变化。
 - [ ] P0-02 【MVP 必需】Merge Queue、真实 Git、数据库状态与 Transactional Outbox 的可恢复闭环。
 
 ### P1
@@ -71,7 +75,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 不得跳过前项门禁；先修 MVP 必需项，Beta 再补项在阶段 3 内处理：
 
 1. stage2: checkpoint enforce authority and takeover fencing（P0-01，✅ 已完成）
-2. stage2: checkpoint canonical workspace and write scopes（P0-03）
+2. stage2: checkpoint canonical workspace and write scopes（P0-03，✅ 已完成）
 3. stage2: checkpoint transactional merge git and outbox（P0-02）
 4. stage2: checkpoint real writable scheduler and cancellation（P1-04 + P1-05）
 5. stage2: checkpoint corrected exit matrix and handoff records（P1-01，重跑矩阵）

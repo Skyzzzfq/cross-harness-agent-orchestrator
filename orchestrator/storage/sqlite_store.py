@@ -141,8 +141,14 @@ class FencedAuthorityError(RuntimeError):
 
 
 class SQLiteStateStore:
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        workspace_policy: Any | None = None,
+    ) -> None:
         self.path = path
+        self.workspace_policy = workspace_policy
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
@@ -893,6 +899,14 @@ class SQLiteStateStore:
             ).fetchall()
             row = None
             for candidate in candidates:
+                if self.workspace_policy is not None:
+                    # P0-03：派发边界——cwd 不在受管 worktree / 项目根则保守跳过
+                    try:
+                        self.workspace_policy.validate_cwd(
+                            candidate["access_mode"], candidate["cwd"]
+                        )
+                    except ValueError:
+                        continue
                 if candidate["access_mode"] == "write":
                     scope = tuple(json.loads(candidate["write_scope_json"]))
                     if scope and self._write_scope_conflicts(
@@ -1491,6 +1505,13 @@ class SQLiteStateStore:
             """,
             (run_id, task_id),
         ).fetchall()
+        if self.workspace_policy is not None:
+            # P0-03：规范化 + 大小写不敏感 + 目录包含的冲突检测
+            for row in rows:
+                other = tuple(json.loads(row["write_scope_json"]))
+                if self.workspace_policy.scopes_conflict(scope, other):
+                    return True
+            return False
         target = set(scope)
         for row in rows:
             other = set(json.loads(row["write_scope_json"]))
@@ -3708,6 +3729,20 @@ class SQLiteStateStore:
             retry_backoff_base_seconds=retry_backoff_base_seconds,
             retry_backoff_max_seconds=retry_backoff_max_seconds,
         )
+        if self.workspace_policy is not None:
+            # P0-03：Task 创建边界——canonical cwd + write_scope 规范化
+            cwd = self.workspace_policy.validate_cwd(access_mode, cwd)
+            if access_mode == "write":
+                write_scope = self.workspace_policy.validate_write_scope(
+                    write_scope, base=cwd
+                )
+        elif access_mode == "write":
+            # 无 policy 时仍做 write_scope 基础校验（非空/相对/无 ../.git）
+            from orchestrator.workspace.policy import validate_write_scope_static
+
+            write_scope = validate_write_scope_static(write_scope)
+        elif write_scope:
+            raise ValueError("read_only task cannot declare write_scope")
         now = utc_now()
         with self.connection:
             self._create_task_tx(
@@ -3784,6 +3819,25 @@ class SQLiteStateStore:
                 retry_backoff_base_seconds=spec["retry_backoff_base_seconds"],
                 retry_backoff_max_seconds=spec["retry_backoff_max_seconds"],
             )
+            if self.workspace_policy is not None:
+                # P0-03：graph 内每个 task 同样做 cwd/write_scope 边界校验
+                spec["cwd"] = self.workspace_policy.validate_cwd(
+                    spec["access_mode"], spec["cwd"]
+                )
+                if spec["access_mode"] == "write":
+                    spec["write_scope"] = self.workspace_policy.validate_write_scope(
+                        spec["write_scope"], base=spec["cwd"]
+                    )
+            elif spec["access_mode"] == "write":
+                from orchestrator.workspace.policy import validate_write_scope_static
+
+                spec["write_scope"] = validate_write_scope_static(
+                    spec["write_scope"]
+                )
+            elif spec["write_scope"]:
+                raise ValueError(
+                    f"read_only task {spec['task_id']} cannot declare write_scope"
+                )
             normalized.append(spec)
 
         edges = list(dict.fromkeys(dependencies))
