@@ -2,9 +2,9 @@
 
 这是一个本地多 Agent 编排器，目标是让 Codex 与 CodeBuddy/WorkBuddy 在同一项目中承担可配置的主管、执行和审核职位。
 
-当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2 为 AUDIT-OPEN，已确认 3 项 P0 和 6 项 P1，整改完成前禁止进入阶段 3。** 当前代码包含 Reconciler、Agent Runtime、Fake Scheduler、真实只读 Adapter、Merge/Outbox/Authority 等组件，但完整权限、路径、Git 事务和真实写任务闭环尚未通过验收。
+当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3 待开始。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径），全量 194 项测试通过。剩余【Beta 再补】项（金额预算、审批原子消费、Outbox 重试）转入阶段 3。
 
-当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。继续开发必须从 [WORKBUDDY_HANDOFF.md](WORKBUDDY_HANDOFF.md) 的 P0-01 开始。
+当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。阶段 3 开始前先读 [WORKBUDDY_HANDOFF.md](WORKBUDDY_HANDOFF.md)。
 
 ## 当前交付范围
 

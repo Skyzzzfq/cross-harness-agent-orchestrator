@@ -147,6 +147,49 @@ class WritableTaskClosedLoopTests(unittest.IsolatedAsyncioTestCase):
                 cwd=str(self.worker),
             )
 
+    async def test_full_pipeline_review_audit_integrate_to_completed(self) -> None:
+        """P1-01：正确结果必须经过三层审核 + 集成才到 COMPLETED（REVIEW 不是终态）。"""
+        self._write_task("task-1", "demo/a.txt")
+        adapter = FakeBackendAdapter(
+            default_behavior=FakeBehavior(delay_seconds=0.01, text="done")
+        )
+        await _tick(self.store, self.authority, adapter, self.controller)
+        self.assertEqual(self.store.task_state("task-1"), TaskState.REVIEW)
+
+        # 三层审核：deterministic + model + human
+        row = self.store.connection.execute(
+            "SELECT attempt_id FROM attempts WHERE task_id='task-1' LIMIT 1"
+        ).fetchone()
+        attempt_id = str(row["attempt_id"])
+        for layer, decision, by in (
+            ("deterministic", "PASS", "verify-script"),
+            ("model", "PASS", "codex-reviewer"),
+            ("human", "APPROVED", "human-admin"),
+        ):
+            self.store.record_review_decision(
+                "run-1", "task-1", attempt_id=attempt_id, layer=layer,
+                decision=decision, decided_by=by, detail={},
+                authority=self.authority,
+            )
+
+        # worker 产出 + 入队 + 真实集成 → COMPLETED
+        commit = self.manager.commit_file(
+            self.worker, "demo/a.txt", "pipeline-result\n", "worker: full pipeline"
+        )
+        self._enqueue("task-1", commit)
+        result = self.executor.run_merge_once("run-1", self.controller, self.authority)
+        self.assertEqual(result["status"], "applied")
+        self.assertEqual(self.store.task_state("task-1"), TaskState.COMPLETED)
+
+        # 审核链落库 + 集成后主仓库干净
+        reviews = self.store.connection.execute(
+            "SELECT layer FROM review_decisions WHERE task_id='task-1'"
+        ).fetchall()
+        self.assertEqual(
+            {r["layer"] for r in reviews}, {"deterministic", "model", "human"}
+        )
+        self.assertTrue(self.manager.is_clean(self.manager.repository))
+
 
 async def _tick(
     store: SQLiteStateStore,

@@ -334,10 +334,27 @@ def run_stage2_real(
             scenarios=scenarios,
         )
     )
-    terminal = [
+    # P1-01：终态口径修正——REVIEW 是 adapter 调用完成点，不是 Task 终态。
+    # 分别统计：adapter 完成（到 REVIEW/终态）、Task 终态、完整流水线终态（COMPLETED）。
+    adapter_completed = [
         item
         for item in result["results"].values()
-        if item["task_state"] in {"REVIEW", "COMPLETED", "FAILED"}
+        if item["task_state"] in {"REVIEW", "COMPLETED", "FAILED", "CANCELLED"}
+    ]
+    at_review = [
+        item
+        for item in result["results"].values()
+        if item["task_state"] == "REVIEW"
+    ]
+    task_terminal = [
+        item
+        for item in result["results"].values()
+        if item["task_state"] in {"COMPLETED", "FAILED", "CANCELLED"}
+    ]
+    full_pipeline_terminal = [
+        item
+        for item in result["results"].values()
+        if item["task_state"] == "COMPLETED"
     ]
     vendor_faults = [
         item
@@ -358,12 +375,15 @@ def run_stage2_real(
         {
             "mode": "stage2-real",
             "scenarios_frozen": len(scenarios),
-            "scenarios_terminal": len(terminal),
+            "scenarios_adapter_completed": len(adapter_completed),
+            "scenarios_at_review": len(at_review),
+            "scenarios_task_terminal": len(task_terminal),
+            "scenarios_full_pipeline_terminal": len(full_pipeline_terminal),
             "vendor_faults": vendor_faults,
             "quality_failures": quality_failures,
             "status": (
                 "ready"
-                if len(terminal) >= len(scenarios)
+                if len(adapter_completed) >= len(scenarios)
                 and len(vendor_faults) + len(quality_failures) == 0
                 else "pending"
             ),
