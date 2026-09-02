@@ -9,7 +9,7 @@
 
 ## 2. 当前可信验证
 
-- 233 项单元、契约、Fake 集成与端到端流水线测试通过。
+- 235 项单元、契约、Fake 集成与端到端流水线测试通过。
 - 实际数据库 schema v12，integrity_check=ok，foreign_key_check=0。
 - 真实 10 个只读 Adapter 场景到达 REVIEW（`scenarios_adapter_completed=10`、`scenarios_at_review=10`），2 CodeBuddy + 1 Codex 真实调用存在时间重叠。
 - 完整流水线（写任务 → REVIEW → 三层审核落库 → 真实 Git 集成 → COMPLETED）已由端到端测试覆盖；集成后主仓库工作区 `is_clean`（用户 checkout 指纹保护）。
