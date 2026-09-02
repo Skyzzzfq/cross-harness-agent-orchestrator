@@ -191,9 +191,11 @@ class OutboxDispatcherTests(unittest.IsolatedAsyncioTestCase):
         result = dispatcher.run_once("run-1", self.controller, self.authority)
         self.assertEqual(result["status"], "failed")
         row = self.store.connection.execute(
-            "SELECT status FROM outbox WHERE run_id='run-1'"
+            "SELECT status, attempts FROM outbox WHERE run_id='run-1'"
         ).fetchone()
-        self.assertEqual(row["status"], "FAILED")
+        # B3：失败不直接死信，而是保持 PENDING 并安排退避重试
+        self.assertEqual(row["status"], "PENDING")
+        self.assertEqual(row["attempts"], 1)
 
 
 class EnqueueMergeValidationTests(unittest.IsolatedAsyncioTestCase):

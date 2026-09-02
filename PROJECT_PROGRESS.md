@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：245/245 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：248/248 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -131,7 +131,8 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 - [x] B2（P1-03）审批 scope/params/expiry/single-use 原子消费 + 重新分配命令
   - `decide_approval` 加 **expiry 原子检查**（过期 PENDING 拒绝，不消费）与 **params 原子校验**（决定传 params 与申请 params_hash 比对，不匹配拒绝）；scope/single-use 在 takeover 消费路径已有。
   - 新增 `reassign_task`（REVIEW/FAILED → READY 重新派发，原子清理未终态 attempt + `task.reassigned` 事件）；CLI `reassign --run --task --reason`（acquire controller/authority 后执行）。
-- [ ] B3（P1-06）Outbox 持久 claim、退避重试、死信
+- [x] B3（P1-06）Outbox 持久 claim、退避重试、死信
+  - `finish_outbox("failed")` 不再直接 FAILED：attempts < `MAX_OUTBOX_ATTEMPTS`(5) 时保持 PENDING 并按指数退避（2^(n-1)s，cap 120s）更新 `available_at`（事件 `outbox.retry_scheduled`）；达到上限进入 FAILED 死信（事件 `outbox.dead_letter`）。`claim_outbox` 只领取 `available_at <= now` 的条目，持久 claim 天然支持。
 
 ### 7.3 退出条件
 

@@ -141,6 +141,9 @@ class FencedAuthorityError(RuntimeError):
 
 
 class SQLiteStateStore:
+    # B3（P1-06）：Outbox 投递失败的最大重试次数，超过进入死信
+    MAX_OUTBOX_ATTEMPTS = 5
+
     def __init__(
         self,
         path: Path,
@@ -2871,29 +2874,64 @@ class SQLiteStateStore:
             now = self._aware_datetime(None).isoformat()
             self._ensure_controller_tx(controller, now)
             row = self.connection.execute(
-                "SELECT run_id FROM outbox WHERE outbox_id = ?", (outbox_id,)
+                "SELECT run_id, attempts FROM outbox WHERE outbox_id = ?",
+                (outbox_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(outbox_id)
             if row["run_id"] != controller.run_id:
                 raise FencedControllerError("controller token belongs to another Run")
-            target = "SENT" if status == "sent" else "FAILED"
-            self.connection.execute(
-                """
-                UPDATE outbox
-                SET status = ?, sent_at = ?
-                WHERE outbox_id = ? AND status = 'PENDING'
-                """,
-                (target, now, outbox_id),
-            )
+            if status == "sent":
+                self.connection.execute(
+                    """
+                    UPDATE outbox
+                    SET status = 'SENT', sent_at = ?
+                    WHERE outbox_id = ? AND status = 'PENDING'
+                    """,
+                    (now, outbox_id),
+                )
+                event_kind = "outbox.delivered"
+            else:
+                # B3（P1-06）：退避重试 / 死信。
+                # attempts 已在 claim 时 +1；未达上限则保持 PENDING 并安排重试，
+                # 达到上限则进入 FAILED（死信），不再投递。
+                attempts = int(row["attempts"] or 1)
+                max_attempts = self.MAX_OUTBOX_ATTEMPTS
+                if attempts < max_attempts:
+                    from datetime import timedelta as _timedelta
+
+                    backoff_seconds = min(120, 2 ** (attempts - 1))
+                    next_at = (
+                        self._aware_datetime(None)
+                        + _timedelta(seconds=backoff_seconds)
+                    ).isoformat()
+                    self.connection.execute(
+                        """
+                        UPDATE outbox
+                        SET available_at = ?
+                        WHERE outbox_id = ? AND status = 'PENDING'
+                        """,
+                        (next_at, outbox_id),
+                    )
+                    event_kind = "outbox.retry_scheduled"
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE outbox
+                        SET status = 'FAILED'
+                        WHERE outbox_id = ? AND status = 'PENDING'
+                        """,
+                        (outbox_id,),
+                    )
+                    event_kind = "outbox.dead_letter"
             self._append_event(
                 row["run_id"],
                 outbox_id,
                 None,
-                "outbox.delivered" if target == "SENT" else "outbox.failed",
+                event_kind,
                 "PENDING",
-                target,
-                {"outbox_id": outbox_id},
+                "SENT" if status == "sent" else "FAILED",
+                {"outbox_id": outbox_id, "attempts": int(row["attempts"] or 1)},
             )
             self.connection.commit()
         except BaseException:
