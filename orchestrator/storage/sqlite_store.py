@@ -2422,6 +2422,7 @@ class SQLiteStateStore:
         *,
         decided_by: str,
         comment: str | None = None,
+        params: dict[str, Any] | None = None,
     ) -> None:
         if decision not in {"APPROVED", "REJECTED"}:
             raise ValueError(f"unsupported decision: {decision}")
@@ -2431,13 +2432,24 @@ class SQLiteStateStore:
             self.connection.execute("BEGIN IMMEDIATE")
             now = self._aware_datetime(None).isoformat()
             row = self.connection.execute(
-                "SELECT run_id, status FROM approval_requests WHERE request_id = ?",
+                "SELECT run_id, status, expires_at, params_hash "
+                "FROM approval_requests WHERE request_id = ?",
                 (request_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(request_id)
             if row["status"] != "PENDING":
                 raise RuntimeError("approval request was already decided")
+            # B2（P1-03）：过期审批不可再决定（原子检查）
+            if row["expires_at"] is not None and str(row["expires_at"]) <= now:
+                raise ValueError("approval request has expired")
+            # B2（P1-03）：params 原子消费——决定必须对应申请时的参数
+            if params is not None:
+                actual_hash = hashlib.sha256(
+                    json.dumps(params, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+                if actual_hash != row["params_hash"]:
+                    raise ValueError("params do not match the approval request")
             self.connection.execute(
                 """
                 UPDATE approval_requests
@@ -2496,6 +2508,63 @@ class SQLiteStateStore:
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def reassign_task(
+        self,
+        run_id: str,
+        task_id: str,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+        *,
+        reason: str = "manual-reassign",
+    ) -> None:
+        """B2（P1-03）：把处于 REVIEW / FAILED 的任务重新进入 READY 重新派发。
+
+        原子消费：需要有效 controller + authority；清理未终态 attempt；
+        重置任务 READY 并记录 task.reassigned 事件。
+        """
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            row = self.connection.execute(
+                "SELECT run_id, state FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            if str(row["run_id"]) != run_id:
+                raise FencedControllerError("task belongs to another Run")
+            state = TaskState(row["state"])
+            if state not in {TaskState.REVIEW, TaskState.FAILED}:
+                raise ValueError(f"task in state {state.value} cannot be reassigned")
+            # 清理进行中的 attempt（标记 CANCELLED，晚到结果被隔离）
+            self.connection.execute(
+                """
+                UPDATE attempts SET state = 'CANCELLED'
+                WHERE task_id = ? AND state NOT IN
+                ('SUBMITTED', 'CANCELLED', 'FAILED', 'STALE')
+                """,
+                (task_id,),
+            )
+            self.connection.execute(
+                "UPDATE tasks SET state = 'READY' WHERE task_id = ?", (task_id,)
+            )
+            self._append_event(
+                run_id,
+                task_id,
+                None,
+                "task.reassigned",
+                state.value,
+                "READY",
+                {"reason": reason},
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def record_review_decision(
         self,

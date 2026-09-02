@@ -185,6 +185,16 @@ def _parser() -> argparse.ArgumentParser:
     budget.add_argument("--max-tasks", type=int, default=None)
     budget.add_argument("--max-cost", type=str, default=None)
     budget.add_argument("--show", action="store_true", help="show current budget status")
+    # B2（P1-03）：重新分配命令
+    reassign = subcommands.add_parser(
+        "reassign", help="reassign a REVIEW/FAILED task back to READY"
+    )
+    reassign.add_argument("--run", dest="run_id", required=True)
+    reassign.add_argument("--task", dest="task_id", required=True)
+    reassign.add_argument("--reason", default="manual-reassign")
+    reassign.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
     db_restore = subcommands.add_parser(
         "db-restore", help="restore the database from a backup"
     )
@@ -397,6 +407,49 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+    if args.command == "reassign":
+        from orchestrator.storage.sqlite_store import (
+            FencedAuthorityError,
+            FencedControllerError,
+        )
+
+        db = _resolve_db(Path.cwd(), args.db)
+        with SQLiteStateStore(db) as store:
+            controller = store.acquire_run_controller(
+                args.run_id, "reassign-op", lease_seconds=60
+            )
+            if controller is None:
+                print(json.dumps({"error": "run controller busy"}, indent=2))
+                return 1
+            try:
+                try:
+                    authority = store.acquire_authority(
+                        args.run_id, "reassign-op", "supervisor", lease_seconds=60
+                    )
+                except FencedAuthorityError as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2))
+                    return 1
+                try:
+                    store.reassign_task(
+                        args.run_id, args.task_id, controller, authority,
+                        reason=args.reason,
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "status": "ok",
+                                "task_id": args.task_id,
+                                "state": store.task_state(args.task_id).value,
+                            },
+                            indent=2,
+                        )
+                    )
+                    return 0
+                except (ValueError, KeyError, FencedControllerError) as exc:
+                    print(json.dumps({"error": str(exc)}, indent=2))
+                    return 1
+            finally:
+                store.release_run_controller(controller)
     if args.command == "db-backup":
         from orchestrator.db_ops import backup_database
 
