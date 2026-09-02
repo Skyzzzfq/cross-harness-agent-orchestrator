@@ -167,6 +167,27 @@ def _parser() -> argparse.ArgumentParser:
     reject.add_argument(
         "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
     )
+    # T6：数据库备份 / 恢复 / 校验（rollback 演练基础）
+    db_backup = subcommands.add_parser("db-backup", help="backup the SQLite database")
+    db_backup.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    db_backup.add_argument(
+        "--backup-dir", type=Path, default=Path(".agent-hub/backups")
+    )
+    db_restore = subcommands.add_parser(
+        "db-restore", help="restore the database from a backup"
+    )
+    db_restore.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    db_restore.add_argument("--backup", type=Path, required=True)
+    db_verify = subcommands.add_parser(
+        "db-verify", help="verify database integrity and schema version"
+    )
+    db_verify.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
     return parser
 
 
@@ -343,6 +364,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             worktree=args.worktree,
         )
         return 0
+    if args.command == "db-backup":
+        from orchestrator.db_ops import backup_database
+
+        db = _resolve_db(Path.cwd(), args.db)
+        backup = backup_database(db, _resolve_db(Path.cwd(), args.backup_dir))
+        print(json.dumps({"backup": str(backup), "status": "ok"}, indent=2))
+        return 0
+    if args.command == "db-restore":
+        from orchestrator.db_ops import restore_database, verify_database
+
+        db = _resolve_db(Path.cwd(), args.db)
+        restore_database(db, args.backup)
+        check = verify_database(db)
+        print(json.dumps({"restored": str(args.backup), **check, "status": "ok"}, indent=2))
+        return 0 if check["integrity_check"] == "ok" else 1
+    if args.command == "db-verify":
+        from orchestrator.db_ops import verify_database
+
+        db = _resolve_db(Path.cwd(), args.db)
+        check = verify_database(db)
+        print(json.dumps(check, indent=2))
+        return 0 if check["integrity_check"] == "ok" and not check["foreign_key_errors"] else 1
     if args.command == "pause":
         result = _run_control_action(
             Path.cwd(), args.db, args.run_id, "pause", args.reason

@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：224/224 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：228/228 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -119,7 +119,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | T3 | **本地状态页 + 管理控制台** | ✅ 已完成（`orchestrator/console/server.py`，CLI `console` 子命令）：本地 HTTP 服务（http.server + 无构建静态页，localhost 默认 8080）。只读 API：status/runs-tasks/events/merges/approvals/outbox/agents（时间线/任务/审批/成本）。管理控制台写操作：发起任务、取消、暂停/恢复——全部复用 store 的 controller/authority fencing；启动时 acquire 协调权成功→读写模式，serve 持有期间→自动只读（写操作 409）。`SQLiteStateStore` 连接允许跨线程（check_same_thread=False）。 |
 | T4 | **Adapter 能力协商与回归** | ✅ 已完成：`BackendCapabilities` 契约（backend/version/supports_write/supports_cancel/supports_structured_output）；Codex（write+cancel）与 CodeBuddy（write，无硬中断 cancel=false）adapter 版本探测（importlib.metadata）；scheduler 派发前能力协商——写任务遇不支持写的后端 → BLOCKED `capability_unsupported`，绝不派发；功能开关 `orchestrator/core/features.py`（`AGENT_HUB_FEATURES` 环境变量，允许列表/减号禁用）。 |
 | T5 | **Windows 支持矩阵** | ✅ 已完成：中文/空格仓库与文件路径下真实 Git 集成 round-trip；300+ 字符长路径；CRLF 内容 round-trip；文件锁测试暴露并修复 `commit_file` 部分写入问题（改用 `safe_write_text` 原子写入，失败不截断原文件）；取消后无遗留 backend call。 |
-| T6 | **数据库升级/降级/备份/恢复演练** | 含 15 分钟 rollback |
+| T6 | **数据库升级/降级/备份/恢复演练** | ✅ 已完成（`orchestrator/db_ops.py` + CLI `db-backup/db-restore/db-verify`）：SQLite 在线备份 API（一致性，不依赖文件拷贝）；备份→修改→恢复→数据回到备份点；verify（integrity_check + foreign_key_check + schema_version 12）；降级演练 = restore 旧备份；schema 升级（v2→v12）迁移后校验通过。 |
 | T7 | **干净 Windows bootstrap** | 30 分钟安装演示 |
 | T8 | **可选 8 Agent + MCP/native timebox** | 1-2 天非阻断评估 |
 
