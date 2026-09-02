@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：210/210 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：219/219 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -117,7 +117,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | T1 | **24h 稳定运行测试框架** | ✅ 已完成（`scripts/stage3_stability_run.py`）：高密度 40 task 0 丢/0 重复 merge 测试 + 崩溃注入对账 + 可配置 24h 长跑脚本（注入→drain 阶段、周期不变量检查 0 丢/0 重复/0 重复通知，报告写入 `.agent-hub/stage3-stability/`）。`serve` 支持外部持有 controller（不自动释放），供长跑驱动复用。 |
 | T2 | **20 个预冻结真实场景** | ✅ 框架完成（`orchestrator/poc/stage3_scenarios.py`）：20 场景清单（10 只读 marker + 10 完整流水线/并行/注入边界/只读声明 scope 拒绝/冲突/取消/依赖/恢复）；Fake 验证可驱动写任务→审核→集成→COMPLETED、并行双写、边界拒绝；真实跑留待有账号环境。顺带修复 P0-03 疏漏：`create_task`/`create_task_graph` 无条件拒绝只读任务声明 write_scope（原仅在无 policy 时拒绝）。 |
 | T3 | **本地状态页 + 管理控制台** | ✅ 已完成（`orchestrator/console/server.py`，CLI `console` 子命令）：本地 HTTP 服务（http.server + 无构建静态页，localhost 默认 8080）。只读 API：status/runs-tasks/events/merges/approvals/outbox/agents（时间线/任务/审批/成本）。管理控制台写操作：发起任务、取消、暂停/恢复——全部复用 store 的 controller/authority fencing；启动时 acquire 协调权成功→读写模式，serve 持有期间→自动只读（写操作 409）。`SQLiteStateStore` 连接允许跨线程（check_same_thread=False）。 |
-| T4 | **Adapter 能力协商与回归** | 版本探测、能力协商、功能开关、模型/Prompt 回归 |
+| T4 | **Adapter 能力协商与回归** | ✅ 已完成：`BackendCapabilities` 契约（backend/version/supports_write/supports_cancel/supports_structured_output）；Codex（write+cancel）与 CodeBuddy（write，无硬中断 cancel=false）adapter 版本探测（importlib.metadata）；scheduler 派发前能力协商——写任务遇不支持写的后端 → BLOCKED `capability_unsupported`，绝不派发；功能开关 `orchestrator/core/features.py`（`AGENT_HUB_FEATURES` 环境变量，允许列表/减号禁用）。 |
 | T5 | **Windows 支持矩阵** | 中文/空格/CRLF/长路径/文件锁/进程树 |
 | T6 | **数据库升级/降级/备份/恢复演练** | 含 15 分钟 rollback |
 | T7 | **干净 Windows bootstrap** | 30 分钟安装演示 |

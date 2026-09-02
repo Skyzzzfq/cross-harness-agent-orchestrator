@@ -15,6 +15,7 @@ from orchestrator.adapters.codebuddy_config import (
 from orchestrator.adapters.contracts import (
     AdapterCallRequest,
     BackendAdapter,
+    BackendCapabilities,
     CallRef,
     CallSnapshot,
     CallState,
@@ -96,6 +97,22 @@ class _BaseRunningCall:
 
 class CodexBackendAdapter:
     backend = "codex"
+
+    def capabilities(self) -> BackendCapabilities:
+        version = None
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            version = _pkg_version("openai-codex")
+        except Exception:  # noqa: BLE001 - 版本探测失败不阻断
+            version = None
+        return BackendCapabilities(
+            backend=self.backend,
+            version=version,
+            supports_write=True,  # Sandbox.workspace_write（限受管 worktree）
+            supports_cancel=True,  # thread.interrupt()
+            supports_structured_output=False,
+        )
 
     async def start(self, request: AdapterCallRequest) -> _BaseRunningCall:
         from openai_codex import ApprovalMode, AsyncCodex, CodexConfig, Sandbox
@@ -264,6 +281,31 @@ class _CodexRunningCall(_BaseRunningCall):
 
 class CodeBuddyBackendAdapter:
     backend = "codebuddy"
+
+    def capabilities(self) -> BackendCapabilities:
+        version = None
+        try:
+            from importlib.metadata import version as _pkg_version
+
+            version = _pkg_version("codebuddy-agent-sdk")
+        except Exception:  # noqa: BLE001 - 版本探测失败不阻断
+            version = None
+        cli_path = None
+        try:
+            cli_path = preferred_codebuddy_cli(Path.cwd())
+        except Exception:  # noqa: BLE001
+            cli_path = None
+        notes = []
+        if cli_path is None:
+            notes.append("codebuddy CLI not found on PATH")
+        return BackendCapabilities(
+            backend=self.backend,
+            version=version,
+            supports_write=True,  # 写任务在受管 worktree 内由 SDK 权限模式控制
+            supports_cancel=False,  # SDK 无硬中断：cancel 为 cancel_unconfirmed
+            supports_structured_output=False,
+            notes=tuple(notes),
+        )
 
     async def start(self, request: AdapterCallRequest) -> _BaseRunningCall:
         from codebuddy_agent_sdk import (

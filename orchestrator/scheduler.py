@@ -110,34 +110,65 @@ async def scheduler_tick(
                 controller=token,
             )
         else:
-            try:
-                terminal = await execute_adapter_call(
-                    store,
-                    adapter,
-                    claim,
+            # T4：能力协商——写任务必须由支持写模式的后端执行
+            if (
+                claim.policy.access_mode == "write"
+                and not adapter.capabilities().supports_write
+            ):
+                terminal = CallSnapshot(
+                    ref=CallRef(
+                        call_id=claim.call_id,
+                        backend=claim.session.backend,
+                        session=claim.session,
+                    ),
+                    state=CallState.BLOCKED,
+                    started_at=utc_now(),
+                    finished_at=utc_now(),
+                    failure=Failure(
+                        kind="capability_unsupported",
+                        message=(
+                            f"backend {claim.session.backend} does not support "
+                            "write tasks; refusing to dispatch"
+                        ),
+                        retryable=False,
+                    ),
+                    backend_invoked=False,
+                )
+                disposition = store.finish_backend_call(
+                    claim.call_id,
+                    terminal,
+                    reason="capability-unsupported",
                     controller=token,
                 )
-                disposition = store.backend_call_snapshot(claim.call_id)[
-                    "disposition"
-                ]
-            except Exception as error:
-                recovery = "fenced"
+            else:
                 try:
-                    recovery = store.recover_backend_call(
-                        claim.call_id,
+                    terminal = await execute_adapter_call(
+                        store,
+                        adapter,
+                        claim,
                         controller=token,
-                        reason="adapter-execution-error",
-                        allow_current_epoch=True,
                     )
-                except FencedControllerError:
-                    pass
-                return {
-                    "call_id": claim.call_id,
-                    "task_id": claim.task_id,
-                    "state": CallState.ORPHANED.value,
-                    "disposition": recovery,
-                    "error": type(error).__name__,
-                }
+                    disposition = store.backend_call_snapshot(claim.call_id)[
+                        "disposition"
+                    ]
+                except Exception as error:
+                    recovery = "fenced"
+                    try:
+                        recovery = store.recover_backend_call(
+                            claim.call_id,
+                            controller=token,
+                            reason="adapter-execution-error",
+                            allow_current_epoch=True,
+                        )
+                    except FencedControllerError:
+                        pass
+                    return {
+                        "call_id": claim.call_id,
+                        "task_id": claim.task_id,
+                        "state": CallState.ORPHANED.value,
+                        "disposition": recovery,
+                        "error": type(error).__name__,
+                    }
         return {
             "call_id": claim.call_id,
             "task_id": claim.task_id,

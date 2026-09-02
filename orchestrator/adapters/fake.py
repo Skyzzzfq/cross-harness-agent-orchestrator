@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from orchestrator.adapters.contracts import (
     AdapterCallRequest,
+    BackendCapabilities,
     CallRef,
     CallSnapshot,
     CallState,
@@ -243,3 +244,12 @@ class FakeBackendAdapter:
             self._active_sessions[request.session.session_id] = request.call_id
             self.launch_count += 1
         return running
+
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            backend=self.backend,
+            version="fake-1",
+            supports_write=True,
+            supports_cancel=True,
+            supports_structured_output=True,
+        )

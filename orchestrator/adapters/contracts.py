@@ -169,6 +169,28 @@ class CallSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class BackendCapabilities:
+    """T4：Adapter 能力声明与版本探测结果（供协商与回归）。"""
+
+    backend: str
+    version: str | None = None
+    supports_write: bool = False
+    supports_cancel: bool = True
+    supports_structured_output: bool = False
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "backend": self.backend,
+            "version": self.version,
+            "supports_write": self.supports_write,
+            "supports_cancel": self.supports_cancel,
+            "supports_structured_output": self.supports_structured_output,
+            "notes": list(self.notes),
+        }
+
+
 class RunningCall(Protocol):
     @property
     def ref(self) -> CallRef: ...
@@ -182,3 +204,5 @@ class BackendAdapter(Protocol):
     backend: str
 
     async def start(self, request: AdapterCallRequest) -> RunningCall: ...
+
+    def capabilities(self) -> BackendCapabilities: ...
