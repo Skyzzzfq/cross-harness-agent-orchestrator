@@ -22,7 +22,11 @@ from orchestrator.adapters.fake import FakeBackendAdapter, FakeBehavior
 from orchestrator.agent_pool import reconcile_pool_once
 from orchestrator.core.config import AgentPoolSpec
 from orchestrator.core.models import TaskState
-from orchestrator.storage.sqlite_store import SQLiteStateStore
+from orchestrator.storage.sqlite_store import (
+    FencedAuthorityError,
+    FencedControllerError,
+    SQLiteStateStore,
+)
 from orchestrator.workspace.git_manager import GitWorkspaceManager
 from orchestrator.workspace.merge_executor import MergeExecutor
 from orchestrator.workspace.policy import WorkspacePolicy
@@ -75,6 +79,7 @@ class StabilityRunner:
         self.injected = 0
         self.invariant_checks = 0
         self.last_error: str | None = None
+        self.errors: list[str] = []
 
     def close(self) -> None:
         self.store.close()
@@ -101,52 +106,45 @@ class StabilityRunner:
         ).fetchall()
         for row in rows:
             task_id = str(row["task_id"])
-            if self.store.connection.execute(
-                "SELECT 1 FROM merge_queue WHERE task_id=? AND status IN "
-                "('PENDING','APPLYING','APPLIED')",
-                (task_id,),
-            ).fetchone():
-                continue
-            seq = task_id.split("-")[1]
-            commit = self.manager.commit_file(
-                self.worker,
-                f"demo/f{seq}.txt",
-                f"result-{task_id}\n",
-                f"worker: {task_id}",
-            )
-            attempt = self.store.connection.execute(
-                "SELECT attempt_id FROM attempts WHERE task_id=? LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if attempt is None:
-                continue
-            self.store.enqueue_merge(
-                "run-1", task_id, str(attempt["attempt_id"]), commit, self.base,
-                self.controller, authority=self.authority, reason="review-passed",
-            )
-            self.executor.run_merge_once("run-1", self.controller, self.authority)
+            try:
+                if self.store.connection.execute(
+                    "SELECT 1 FROM merge_queue WHERE task_id=? AND status IN "
+                    "('PENDING','APPLYING','APPLIED')",
+                    (task_id,),
+                ).fetchone():
+                    continue
+                seq = task_id.split("-")[1]
+                commit = self.manager.commit_file(
+                    self.worker,
+                    f"demo/f{seq}.txt",
+                    f"result-{task_id}\n",
+                    f"worker: {task_id}",
+                )
+                attempt = self.store.connection.execute(
+                    "SELECT attempt_id FROM attempts WHERE task_id=? LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if attempt is None:
+                    continue
+                self.store.enqueue_merge(
+                    "run-1", task_id, str(attempt["attempt_id"]), commit, self.base,
+                    self.controller, authority=self.authority, reason="review-passed",
+                )
+                self.executor.run_merge_once("run-1", self.controller, self.authority)
+            except Exception as exc:  # noqa: BLE001 - 单任务失败不中断长跑
+                self.errors.append(
+                    f"settle {task_id}: {type(exc).__name__}: {exc}"
+                )
 
-    def check_invariants(self) -> list[str]:
-        """0 丢任务 / 0 重复 merge / 0 重复通知。返回违规列表。"""
+    def check_no_duplicates(self) -> list[str]:
+        """0 重复 merge / 0 重复通知（注入与 drain 阶段都适用）。"""
         violations: list[str] = []
-        total = self.injected
-        if total == 0:
-            return violations
-        # 0 丢：每个已注入任务必须到达终态（COMPLETED/FAILED/CANCELLED）
-        stuck = self.store.connection.execute(
-            "SELECT COUNT(*) FROM tasks WHERE run_id='run-1' "
-            "AND state NOT IN ('COMPLETED','FAILED','CANCELLED')"
-        ).fetchone()[0]
-        if stuck:
-            violations.append(f"{stuck} tasks not in terminal state")
-        # 0 重复 merge：每 task 至多 1 条 APPLIED
         dup = self.store.connection.execute(
             "SELECT COUNT(*) FROM (SELECT task_id FROM merge_queue "
             "WHERE status='APPLIED' GROUP BY task_id HAVING COUNT(*) > 1)"
         ).fetchone()[0]
         if dup:
             violations.append(f"{dup} tasks have duplicate APPLIED merges")
-        # 0 重复通知：每 merge 至多 1 条 outbox intent
         dup_outbox = self.store.connection.execute(
             "SELECT COUNT(*) FROM (SELECT aggregate_id FROM outbox "
             "WHERE event_type='merge.applied' GROUP BY aggregate_id "
@@ -155,6 +153,17 @@ class StabilityRunner:
         if dup_outbox:
             violations.append(f"{dup_outbox} merges have duplicate outbox intents")
         return violations
+
+    def check_no_stuck(self) -> list[str]:
+        """0 丢任务：仅在 drain 阶段调用（在途任务合法）。"""
+        stuck = self.store.connection.execute(
+            "SELECT task_id, state FROM tasks WHERE run_id='run-1' "
+            "AND state NOT IN ('COMPLETED','FAILED','CANCELLED')"
+        ).fetchall()
+        if stuck:
+            detail = ", ".join(f"{t['task_id']}={t['state']}" for t in stuck)
+            return [f"{len(stuck)} tasks not in terminal state: {detail}"]
+        return []
 
     async def run(self) -> dict[str, Any]:
         from orchestrator.serve import serve
@@ -165,14 +174,26 @@ class StabilityRunner:
         started = time.monotonic()
         deadline = started + self.duration_seconds
         drain_deadline: float | None = None
-        adapter = FakeBackendAdapter(
-            default_behavior=FakeBehavior(delay_seconds=0, text="done")
-        )
 
         async def scheduler() -> None:
             nonlocal drain_deadline
             while True:
-                if self.injected < self.total_tasks and time.monotonic() < deadline:
+                # 长跑驱动持续持有协调权：每 tick 续租（默认 lease 只有 300s）
+                try:
+                    self.authority = self.store.renew_authority(
+                        self.authority, lease_seconds=300
+                    )
+                    self.controller = self.store.renew_run_controller(
+                        self.controller, lease_seconds=120
+                    )
+                except (FencedAuthorityError, FencedControllerError) as exc:
+                    self.last_error = f"lost lease during renewal: {exc}"
+                    break
+                injecting = (
+                    self.injected < self.total_tasks
+                    and time.monotonic() < deadline
+                )
+                if injecting:
                     self._inject_write_task()
                 await serve(
                     self.store,
@@ -185,17 +206,24 @@ class StabilityRunner:
                     max_ticks=1,
                 )
                 self._settle_reviewed_merge()
-                violations = self.check_invariants()
+                # 重复 merge/通知在任何阶段都是违规
+                violations = self.check_no_duplicates()
                 self.invariant_checks += 1
                 if violations:
                     self.last_error = "; ".join(violations)
                     break
-                pending = self.store.connection.execute(
-                    "SELECT COUNT(*) FROM tasks WHERE run_id='run-1' "
-                    "AND state NOT IN ('COMPLETED','FAILED','CANCELLED')"
-                ).fetchone()[0]
-                if self.injected >= self.total_tasks and pending == 0:
-                    break  # 全部注入并完全 drain
+                if not injecting:
+                    # 进入 drain 阶段才检查 0 丢（在途任务合法）
+                    stuck = self.check_no_stuck()
+                    if stuck:
+                        self.last_error = "; ".join(stuck)
+                        break
+                    pending = self.store.connection.execute(
+                        "SELECT COUNT(*) FROM tasks WHERE run_id='run-1' "
+                        "AND state NOT IN ('COMPLETED','FAILED','CANCELLED')"
+                    ).fetchone()[0]
+                    if self.injected >= self.total_tasks and pending == 0:
+                        break  # 全部注入并完全 drain
                 if time.monotonic() >= deadline and drain_deadline is None:
                     drain_deadline = time.monotonic() + 1800  # 最多再等 30 分钟
                 if drain_deadline is not None and time.monotonic() >= drain_deadline:
@@ -205,7 +233,7 @@ class StabilityRunner:
 
         await scheduler()
         elapsed = time.monotonic() - started
-        violations = self.check_invariants()
+        violations = self.check_no_duplicates() + self.check_no_stuck()
         summary = {
             "mode": "stage3-stability",
             "duration_seconds": round(elapsed, 3),
@@ -223,6 +251,8 @@ class StabilityRunner:
         }
         if self.last_error:
             summary["last_error"] = self.last_error
+        if self.errors:
+            summary["settle_errors"] = self.errors[:20]
         return summary
 
 
