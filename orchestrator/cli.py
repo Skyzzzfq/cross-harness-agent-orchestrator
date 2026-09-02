@@ -175,6 +175,16 @@ def _parser() -> argparse.ArgumentParser:
     db_backup.add_argument(
         "--backup-dir", type=Path, default=Path(".agent-hub/backups")
     )
+    # B1（P1-02）：预算硬上限
+    budget = subcommands.add_parser("budget", help="set or show run budget limits")
+    budget.add_argument("--run", dest="run_id", required=True)
+    budget.add_argument("--db", type=Path, default=Path(".agent-hub/state/agent-hub.db"))
+    budget.add_argument("--max-seconds", type=int, default=None)
+    budget.add_argument("--max-calls", type=int, default=None)
+    budget.add_argument("--max-turns", type=int, default=None)
+    budget.add_argument("--max-tasks", type=int, default=None)
+    budget.add_argument("--max-cost", type=str, default=None)
+    budget.add_argument("--show", action="store_true", help="show current budget status")
     db_restore = subcommands.add_parser(
         "db-restore", help="restore the database from a backup"
     )
@@ -364,6 +374,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             worktree=args.worktree,
         )
         return 0
+    if args.command == "budget":
+        db = _resolve_db(Path.cwd(), args.db)
+        with SQLiteStateStore(db) as store:
+            if args.show:
+                status = store.budget_status(args.run_id)
+                print(json.dumps(status, ensure_ascii=False, indent=2))
+                return 0 if not status["exceeded"] else 2
+            store.record_budget(
+                args.run_id,
+                max_run_seconds=args.max_seconds,
+                max_calls=args.max_calls,
+                max_turns=args.max_turns,
+                max_tasks=args.max_tasks,
+                max_cost_decimal=args.max_cost,
+            )
+            print(
+                json.dumps(
+                    {"status": "ok", "run_id": args.run_id, **store.budget_status(args.run_id)},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
     if args.command == "db-backup":
         from orchestrator.db_ops import backup_database
 

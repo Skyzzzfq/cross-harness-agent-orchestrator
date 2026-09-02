@@ -2637,6 +2637,9 @@ class SQLiteStateStore:
                 "calls": None,
                 "tasks": None,
                 "run_seconds": None,
+                "turns": 0,
+                "tokens": 0,
+                "cost": 0.0,
             }
         calls = self.connection.execute(
             "SELECT COUNT(*) FROM backend_calls WHERE run_id = ?", (run_id,)
@@ -2644,6 +2647,24 @@ class SQLiteStateStore:
         tasks = self.connection.execute(
             "SELECT COUNT(*) FROM tasks WHERE run_id = ?", (run_id,)
         ).fetchone()[0]
+        # B1（P1-02）：从权威 usage_json 聚合 turn / token / 金额用量
+        usage_row = self.connection.execute(
+            """
+            SELECT
+              COALESCE(SUM(json_extract(usage_json, '$.turns')), 0) AS turns,
+              COALESCE(SUM(CAST(json_extract(usage_json, '$.cost_decimal') AS REAL)), 0)
+                AS cost,
+              COALESCE(SUM(json_extract(usage_json, '$.input_tokens')), 0)
+                + COALESCE(SUM(json_extract(usage_json, '$.output_tokens')), 0)
+                AS tokens
+            FROM backend_calls
+            WHERE run_id = ? AND usage_json IS NOT NULL
+            """,
+            (run_id,),
+        ).fetchone()
+        turns = int(usage_row["turns"] or 0)
+        cost = float(usage_row["cost"] or 0)
+        tokens = int(usage_row["tokens"] or 0)
         try:
             started = datetime.fromisoformat(row["run_created_at"])
             run_seconds = max(
@@ -2656,8 +2677,16 @@ class SQLiteStateStore:
             (calls, row["max_calls"]),
             (tasks, row["max_tasks"]),
             (run_seconds, row["max_run_seconds"]),
+            (turns, row["max_turns"]),
+            (cost, row["max_cost_decimal"]),
         ):
-            if limit is not None and usage >= int(limit):
+            if limit is None:
+                continue
+            try:
+                numeric_limit = float(limit)
+            except (TypeError, ValueError):
+                continue
+            if usage >= numeric_limit:
                 exceeded = True
         return {
             "run_id": run_id,
@@ -2665,6 +2694,9 @@ class SQLiteStateStore:
             "calls": int(calls),
             "tasks": int(tasks),
             "run_seconds": run_seconds,
+            "turns": turns,
+            "tokens": tokens,
+            "cost": round(cost, 6),
             "max_calls": row["max_calls"],
             "max_tasks": row["max_tasks"],
             "max_run_seconds": row["max_run_seconds"],

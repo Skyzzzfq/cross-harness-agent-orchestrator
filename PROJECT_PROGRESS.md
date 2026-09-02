@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：235/235 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：239/239 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -125,9 +125,11 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ### 7.2 Beta 再补项（阶段 2 审计遗留，在本阶段内处理）
 
-- B1（P1-02）金额/turn/Token 硬预算 + 并发预算预留
-- B2（P1-03）审批 scope/params/expiry/single-use 原子消费 + 重新分配命令
-- B3（P1-06）Outbox 持久 claim、退避重试、死信
+- [x] B1（P1-02）金额/turn/Token 硬预算 + 并发预算预留
+  - `budget_status` 从权威 `usage_json` 聚合 **turns / tokens / cost**（json_extract SUM，cost 用 CAST REAL），并参与 `exceeded` 判定（max_turns / max_cost_decimal 任一达到即停派发）。
+  - scheduler 派发前预算检查已存在（`claim_ready_dispatch` exceeded → None 停止派发）；CLI `budget --run --max-turns/--max-cost/--show`。
+- [ ] B2（P1-03）审批 scope/params/expiry/single-use 原子消费 + 重新分配命令
+- [ ] B3（P1-06）Outbox 持久 claim、退避重试、死信
 
 ### 7.3 退出条件
 
