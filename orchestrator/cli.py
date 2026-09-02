@@ -86,6 +86,18 @@ def _parser() -> argparse.ArgumentParser:
         default="fake",
         help="adapter backend for the resident loop (default: fake)",
     )
+    # T3：本地状态页 + 管理控制台
+    console_parser = subcommands.add_parser(
+        "console", help="local status page + management console (HTTP)"
+    )
+    console_parser.add_argument("--run", dest="run_id", required=True)
+    console_parser.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    console_parser.add_argument("--port", type=int, default=8080)
+    console_parser.add_argument("--host", default="127.0.0.1")
+    console_parser.add_argument("--owner", default="human-ops")
+    console_parser.add_argument("--worktree", default=None)
     pause = subcommands.add_parser("pause", help="pause dispatch for a Run")
     pause.add_argument("--run", dest="run_id", required=True)
     pause.add_argument("--reason", default="manual-pause")
@@ -319,6 +331,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] in {"stopped", "interrupted"} else 1
+    if args.command == "console":
+        from orchestrator.console.server import run_console
+
+        run_console(
+            db=_resolve_db(Path.cwd(), args.db),
+            run_id=args.run_id,
+            port=args.port,
+            host=args.host,
+            owner=args.owner,
+            worktree=args.worktree,
+        )
+        return 0
     if args.command == "pause":
         result = _run_control_action(
             Path.cwd(), args.db, args.run_id, "pause", args.reason

@@ -150,7 +150,9 @@ class SQLiteStateStore:
         self.path = path
         self.workspace_policy = workspace_policy
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+        # 允许跨线程使用同一连接（控制台等本地工具在服务线程访问）；
+        # SQLite 会串行化写事务，调用方仍需避免并发修改同一连接。
+        self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
         self._migrate_schema()
