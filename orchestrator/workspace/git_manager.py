@@ -206,7 +206,8 @@ class GitWorkspaceManager:
         except ValueError as exc:
             raise ValueError("write target is outside worktree") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        # T5：原子写入——文件被占用时安全失败，不产生部分写入/截断
+        self.safe_write_text(target, content)
         _git(worktree, "add", "--", relative_path)
         _git(worktree, "commit", "-m", message)
         return self.head(worktree)
