@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：248/248 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：250/250 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -122,6 +122,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | T6 | **数据库升级/降级/备份/恢复演练** | ✅ 已完成（`orchestrator/db_ops.py` + CLI `db-backup/db-restore/db-verify`）：SQLite 在线备份 API（一致性，不依赖文件拷贝）；备份→修改→恢复→数据回到备份点；verify（integrity_check + foreign_key_check + schema_version 12）；降级演练 = restore 旧备份；schema 升级（v2→v12）迁移后校验通过。 |
 | T7 | **干净 Windows bootstrap** | ✅ 已完成（`orchestrator/bootstrapper.py` + `scripts/bootstrap.py` + `docs/INSTALL.md`）：前置检查（Python>=3.10/Git 必需 + Codex/CodeBuddy CLI 可选探测）、创建 venv + `pip install -e .`、初始化 `.agent-hub/{state,reports,backups,certs,logs}`；INSTALL.md 给出 30 分钟安装演示全流程（检查→bootstrap→init→serve→console→db 演练）。注意：**不要覆盖 `orchestrator/bootstrap.py`**（那是 CLI `init` 的核心 `initialize_hub`）。 |
 | T8 | **可选 8 Agent + MCP/native timebox** | ✅ 已完成：8 Agent 并发验证（并发峰值 BUSY=8 达池上限；8 路写任务并行→真实集成→全部 COMPLETED，0 重复 merge）；`docs/T8_MCP_EVALUATION.md` 给出 MCP Facade / CodeBuddy native team 的 timebox 结论（均非阻断、延后，当前架构不依赖）。默认并发 2–4，8 Agent 为可选上限。 |
+| EXT | **本地网页产品控制台（用户需求）** | ✅ 已完成：`orchestrator/console/` 升级为多 Run 产品控制台（settings/serve_manager/server 三模块）。**Connections**（探测 codex/codebuddy 登录态 + 登录引导，不存储凭证）；**Teams**（鼠标组建临时 team：backend/role/count 多池编辑 + 预览 JSON，保存到 `.agent-hub/teams/` 或覆盖默认 `config/team.yaml`）；**Runs**（全部 Run 列表/新建，按 team 一键启动/停止 serve 子进程，日志 `.agent-hub/logs/serve-<run>.log`）；保留单 Run 详情（任务/审批/merge 时间线）。协调写（取消/暂停/恢复）操作时临时 acquire controller，serve 持权期间 409。新增 CLI `serve-team --run --team`（按 team 多后端 pools 启动常驻）。 |
 
 ### 7.2 Beta 再补项（阶段 2 审计遗留，在本阶段内处理）
 

@@ -78,6 +78,18 @@ def _parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--interval", type=float, default=1.0)
     serve_parser.add_argument("--lease", type=int, default=300)
+    # 网页控制台：按 team 配置启动 serve（多后端 pools）
+    serve_team_parser = subcommands.add_parser(
+        "serve-team",
+        help="run the resident loop for one Run using a saved team config",
+    )
+    serve_team_parser.add_argument("--run", dest="run_id", required=True)
+    serve_team_parser.add_argument("--team", type=Path, required=True)
+    serve_team_parser.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    serve_team_parser.add_argument("--interval", type=float, default=1.0)
+    serve_team_parser.add_argument("--lease", type=int, default=300)
     serve_parser.add_argument("--max-ticks", type=int, default=None)
     # P1-04：常驻服务可选接入真实 Adapter（写任务需配合受管 worktree）
     serve_parser.add_argument(
@@ -88,15 +100,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     # T3：本地状态页 + 管理控制台
     console_parser = subcommands.add_parser(
-        "console", help="local status page + management console (HTTP)"
+        "console", help="web console: runs / teams / connections (HTTP)"
     )
-    console_parser.add_argument("--run", dest="run_id", required=True)
+    console_parser.add_argument(
+        "--run", dest="run_id", default=None, help="初始打开的 Run（可选）"
+    )
     console_parser.add_argument(
         "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
     )
     console_parser.add_argument("--port", type=int, default=8080)
     console_parser.add_argument("--host", default="127.0.0.1")
-    console_parser.add_argument("--owner", default="human-ops")
     console_parser.add_argument("--worktree", default=None)
     pause = subcommands.add_parser("pause", help="pause dispatch for a Run")
     pause.add_argument("--run", dest="run_id", required=True)
@@ -326,6 +339,59 @@ def _run_serve(
         store.close()
 
 
+def _run_serve_team(
+    cwd: Path,
+    db: Path,
+    run_id: str,
+    team_path: Path,
+    interval: float,
+    lease: int,
+) -> dict[str, object]:
+    """按保存的 team 配置启动常驻循环（支持多后端 pools）。"""
+    from orchestrator.core.config import load_team_spec
+
+    store = SQLiteStateStore(_resolve_db(cwd, db))
+    try:
+        resolved_team = team_path if team_path.is_absolute() else cwd / team_path
+        spec = load_team_spec(resolved_team)
+        # 需要真实登录态的写任务受管 worktree 由 WorkspacePolicy 控制；
+        # 这里按 team 的 backend 构建 adapter（fake 用于离线跑通）。
+        adapters: dict[str, object] = {}
+        from orchestrator.adapters.fake import FakeBackendAdapter
+
+        for pool in spec.agent_pools:
+            backend = pool.backend
+            if backend in adapters:
+                continue
+            if backend == "fake":
+                adapters["fake"] = FakeBackendAdapter()
+            elif backend == "codex":
+                from orchestrator.adapters.real import CodexBackendAdapter
+
+                adapters["codex"] = CodexBackendAdapter()
+            elif backend == "codebuddy":
+                from orchestrator.adapters.real import CodeBuddyBackendAdapter
+
+                adapters["codebuddy"] = CodeBuddyBackendAdapter()
+            else:
+                return {"status": "error", "error": f"unknown backend {backend}"}
+        try:
+            return asyncio.run(
+                serve(
+                    store,
+                    run_id,
+                    adapters,
+                    team_spec=spec,
+                    interval=interval,
+                    controller_lease_seconds=lease,
+                )
+            )
+        except KeyboardInterrupt:
+            return {"status": "interrupted", "run_id": run_id}
+    finally:
+        store.close()
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     if args.command == "init":
@@ -372,15 +438,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] in {"stopped", "interrupted"} else 1
+    if args.command == "serve-team":
+        result = _run_serve_team(
+            Path.cwd(),
+            args.db,
+            args.run_id,
+            args.team,
+            args.interval,
+            args.lease,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["status"] in {"stopped", "interrupted"} else 1
     if args.command == "console":
         from orchestrator.console.server import run_console
 
         run_console(
-            db=_resolve_db(Path.cwd(), args.db),
-            run_id=args.run_id,
+            db=args.db,
+            project_root=Path.cwd(),
             port=args.port,
             host=args.host,
-            owner=args.owner,
+            initial_run_id=args.run_id,
             worktree=args.worktree,
         )
         return 0
