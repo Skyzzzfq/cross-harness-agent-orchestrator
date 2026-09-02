@@ -25,31 +25,38 @@
 
 ## 3. 阶段 3 任务台账
 
-1. **T1 24h 稳定运行测试框架**：Fake + serve + merge/outbox 闭环，高密度 + 崩溃注入，0 丢/0 重复；可配置长时间运行脚本。
-2. **T2 20 个预冻结真实场景**：完整终态（审核+集成到 COMPLETED），扩展 `stage2-real`。
-3. **T3 本地状态页 + 管理控制台**：①只读状态页（时间线/成本/诊断）；②管理控制台（发起任务、审批单处理、取消/暂停、Git 冲突处理）——写操作必须复用 store fencing/authority 校验。
-4. **T4 Adapter 能力协商与回归**：版本探测、能力协商、功能开关、模型/Prompt 回归。
-5. **T5 Windows 支持矩阵**：中文/空格/CRLF/长路径/文件锁/进程树。
-6. **T6 数据库升级/降级/备份/恢复 + 15 分钟 rollback 演练**。
-7. **T7 干净 Windows bootstrap**：30 分钟安装演示。
-8. **T8 可选 8 Agent 验证 + MCP Facade/native team 有时限评估**。
-9. **Beta 再补项**：B1（P1-02 金额预算）、B2（P1-03 审批原子消费+重新分配）、B3（P1-06 Outbox 重试）。
+1. **T1 24h 稳定运行测试框架** ✅（59448ad）：`scripts/stage3_stability_run.py` + 高密度/崩溃注入测试。
+2. **T2 20 个预冻结真实场景** ✅（e5d462e）：`orchestrator/poc/stage3_scenarios.py` 20 场景清单 + Fake 验证框架。
+3. **T3 本地状态页 + 管理控制台** ✅（2d955b2）：`orchestrator/console/server.py`，CLI `console`。
+4. **T4 Adapter 能力协商与回归** ✅（289cd88）：`BackendCapabilities` + scheduler 能力校验 + 功能开关。
+5. **T5 Windows 支持矩阵** ✅（b569778）：中文/空格/CRLF/长路径/文件锁（修复 commit_file 部分写入）。
+6. **T6 数据库升级/降级/备份/恢复** ✅（0c27c10）：`db_ops.py` + CLI `db-backup/restore/verify`。
+7. **T7 干净 Windows bootstrap** ✅（eaec061）：`bootstrapper.py` + `scripts/bootstrap.py` + `docs/INSTALL.md`。
+8. **T8 可选 8 Agent + MCP/native timebox** ✅（631d5a0）：8 Agent 并发/写闭环 + `docs/T8_MCP_EVALUATION.md`。
+9. **Beta 再补项** ✅：B1 预算（49aaea4）、B2 审批消费+重新分配（f1027df）、B3 Outbox 重试+死信（a97942c）。
 
-## 4. 第一个任务
+全量 **248 项测试通过**，编译 OK、凭据扫描 0。
 
-只处理 T1：**24 小时 Fake 稳定运行（≥500 Task，0 丢任务、0 重复 merge）**。
+## 4. 阶段 3 剩余门槛（需真实环境执行）
 
-要求：
+代码与框架已完成；以下真实验证门槛需要 Codex/CodeBuddy 账号环境：
 
-- 先补失败测试，定义"稳定运行"验收（长时间 + 高任务量 + 崩溃注入下 0 丢/0 重复）。
-- 复用现有 `serve` + Fake adapter + MergeExecutor/OutboxDispatcher 闭环。
-- 不修改审计已确认的安全边界（authority/workspace/merge 原子性）。
+1. **E1**：`scripts/stage3_stability_run.py --hours 24 --tasks 600` 真实 24h 跑，完全 drain，0 丢/0 重复。
+2. **E2**：`stage3-real` 跑 20 个预冻结真实场景 ≥19 正确，0 数据丢失/0 重复 merge。
+3. **E3**：drain 后孤儿进程/无引用 worktree 为 0。
+4. **E4**：Windows 中文/空格/CRLF/长路径/文件占用处理演练。
+5. **E5**：Prompt 注入语料下越界写/凭据泄露/绕过审批/改变主管权 4 项 0。
+6. **E6/E7**：升级、降级、数据库恢复演练 + 15 分钟 rollback（`db-backup`/`db-restore`/`db-verify`）。
+7. **E8**：干净 Windows 30 分钟安装演示（`docs/INSTALL.md`）。
+
+全部满足后创建 `stage3: complete Beta`。
 
 完成后：
 
 - 更新 PROJECT_PROGRESS.md 和 STAGE2_REPORT.md。
 - 提交信息使用 `stage3: checkpoint <short description>`，不得使用 complete（阶段 3 未全部完成）。
 - 推送并记录远端 SHA。
+- 全程不修改审计已确认的安全边界（authority/workspace/merge 原子性）。
 
 ## 5. 后续顺序
 
