@@ -3806,6 +3806,9 @@ class SQLiteStateStore:
             retry_backoff_base_seconds=retry_backoff_base_seconds,
             retry_backoff_max_seconds=retry_backoff_max_seconds,
         )
+        # 只读任务不能声明 write_scope（无论是否注入 policy 都强制执行）
+        if access_mode != "write" and write_scope:
+            raise ValueError("read_only task cannot declare write_scope")
         if self.workspace_policy is not None:
             # P0-03：Task 创建边界——canonical cwd + write_scope 规范化
             cwd = self.workspace_policy.validate_cwd(access_mode, cwd)
@@ -3818,8 +3821,6 @@ class SQLiteStateStore:
             from orchestrator.workspace.policy import validate_write_scope_static
 
             write_scope = validate_write_scope_static(write_scope)
-        elif write_scope:
-            raise ValueError("read_only task cannot declare write_scope")
         now = utc_now()
         with self.connection:
             self._create_task_tx(
@@ -3896,6 +3897,11 @@ class SQLiteStateStore:
                 retry_backoff_base_seconds=spec["retry_backoff_base_seconds"],
                 retry_backoff_max_seconds=spec["retry_backoff_max_seconds"],
             )
+            # 只读任务不能声明 write_scope（无论是否注入 policy 都强制执行）
+            if spec["access_mode"] != "write" and spec["write_scope"]:
+                raise ValueError(
+                    f"read_only task {spec['task_id']} cannot declare write_scope"
+                )
             if self.workspace_policy is not None:
                 # P0-03：graph 内每个 task 同样做 cwd/write_scope 边界校验
                 spec["cwd"] = self.workspace_policy.validate_cwd(
@@ -3910,10 +3916,6 @@ class SQLiteStateStore:
 
                 spec["write_scope"] = validate_write_scope_static(
                     spec["write_scope"]
-                )
-            elif spec["write_scope"]:
-                raise ValueError(
-                    f"read_only task {spec['task_id']} cannot declare write_scope"
                 )
             normalized.append(spec)
 

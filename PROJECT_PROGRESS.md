@@ -20,7 +20,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 ## 2. 已验证基线
 
-- 全量测试：197/197 通过（P0 修复 33 项 + P1 修复 11 项新增）。
+- 全量测试：203/203 通过（P0 修复 33 项 + P1 修复 11 项新增）。
 - 当前实际数据库：schema v12，integrity_check=ok，foreign_key_check=0。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
@@ -115,7 +115,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | # | 任务 | 说明 |
 |---|---|---|
 | T1 | **24h 稳定运行测试框架** | ✅ 已完成（`scripts/stage3_stability_run.py`）：高密度 40 task 0 丢/0 重复 merge 测试 + 崩溃注入对账 + 可配置 24h 长跑脚本（注入→drain 阶段、周期不变量检查 0 丢/0 重复/0 重复通知，报告写入 `.agent-hub/stage3-stability/`）。`serve` 支持外部持有 controller（不自动释放），供长跑驱动复用。 |
-| T2 | **20 个预冻结真实场景** | 真实 Codex/CodeBuddy 完整终态（审核+集成到 COMPLETED），扩展 `stage2-real` 框架到 20 场景 |
+| T2 | **20 个预冻结真实场景** | ✅ 框架完成（`orchestrator/poc/stage3_scenarios.py`）：20 场景清单（10 只读 marker + 10 完整流水线/并行/注入边界/只读声明 scope 拒绝/冲突/取消/依赖/恢复）；Fake 验证可驱动写任务→审核→集成→COMPLETED、并行双写、边界拒绝；真实跑留待有账号环境。顺带修复 P0-03 疏漏：`create_task`/`create_task_graph` 无条件拒绝只读任务声明 write_scope（原仅在无 policy 时拒绝）。 |
 | T3 | **本地状态页 + 管理控制台** | ①只读状态页：时间线/任务状态/成本/诊断包（localhost）；②**管理控制台（用户新需求）**：发起新任务、审批单处理（merge/force-takeover）、取消/暂停/恢复、Git 冲突处理——写操作**必须复用 store 的 fencing/authority 校验**，不绕过安全边界；技术：FastAPI 或 http.server + 无构建静态前端 |
 | T4 | **Adapter 能力协商与回归** | 版本探测、能力协商、功能开关、模型/Prompt 回归 |
 | T5 | **Windows 支持矩阵** | 中文/空格/CRLF/长路径/文件锁/进程树 |
