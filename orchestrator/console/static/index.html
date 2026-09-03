@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Hub · 编排控制台</title>
+<style>
+:root{
+  --bg:#0b1220; --bg-soft:#0f1a2b; --panel:#151f31; --panel-2:#1b2740;
+  --line:#243349; --line-soft:#1d2a40;
+  --text:#e6edf7; --text-2:#9fb0c9; --text-3:#64748b;
+  --accent:#4f8cff; --accent-2:#22d3ee; --accent-soft:rgba(79,140,255,.12);
+  --ok:#34d399; --warn:#fbbf24; --err:#f87171; --violet:#a78bfa;
+  --shadow:0 10px 30px rgba(2,6,23,.45);
+  --r:12px; --r-sm:8px;
+  --mono:ui-monospace,"Cascadia Code",Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  background:radial-gradient(1200px 600px at 80% -10%,#16233f 0%,transparent 60%),var(--bg);
+  color:var(--text);font-size:14px;line-height:1.6;
+}
+/* ---------- 顶栏 ---------- */
+header{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:20px;
+  padding:0 22px;height:56px;background:rgba(11,18,32,.82);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.logo{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;letter-spacing:.2px}
+.logo .dot{width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 0 12px rgba(79,140,255,.8)}
+nav{display:flex;gap:2px}
+nav button{
+  border:0;background:transparent;color:var(--text-2);padding:7px 14px;border-radius:var(--r-sm);
+  cursor:pointer;font-size:13.5px;font-family:inherit;transition:.15s
+}
+nav button:hover{color:var(--text);background:rgba(255,255,255,.04)}
+nav button.active{color:#fff;background:var(--accent-soft)}
+nav button.active::after{content:"";display:block;height:2px;border-radius:2px;margin-top:3px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+.head-meta{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--text-3);font-size:12px}
+.chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:11.5px}
+.live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);margin-right:5px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+/* ---------- 布局 ---------- */
+main{max-width:1180px;margin:0 auto;padding:26px 24px 90px;display:none}
+main.active{display:block}
+.view-head{display:flex;align-items:baseline;gap:12px;margin-bottom:18px}
+.view-head h2{font-size:20px;font-weight:650}
+.view-head .sub{color:var(--text-3);font-size:12.5px}
+/* ---------- 卡片 ---------- */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
+.card + .card{margin-top:16px}
+.card-h{padding:13px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px}
+.card-h h3{font-size:14px;font-weight:600}
+.card-h .grow{margin-left:auto;display:flex;gap:8px;align-items:center}
+.card-b{padding:18px}
+/* ---------- 统计 ---------- */
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.stat .k{color:var(--text-3);font-size:12px}
+.stat .v{font-size:24px;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums}
+.stat .v.ok{color:var(--ok)} .stat .v.warn{color:var(--warn)} .stat .v.accent{color:var(--accent)}
+/* ---------- 表格 ---------- */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{color:var(--text-3);font-weight:500;font-size:12px;text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:rgba(255,255,255,.018)}
+.mono{font-family:var(--mono);font-size:12.5px}
+.muted{color:var(--text-3);font-size:12px}
+tr.click{cursor:pointer}
+/* ---------- 徽章 ---------- */
+.pill{display:inline-flex;align-items:center;gap:5px;padding:1px 9px;border-radius:999px;font-size:11.5px;font-weight:500;white-space:nowrap}
+.pill::before{content:"";width:6px;height:6px;border-radius:50%}
+.pill.ok{background:rgba(52,211,153,.12);color:#6ee7b7}.pill.ok::before{background:var(--ok)}
+.pill.warn{background:rgba(251,191,36,.12);color:#fcd34d}.pill.warn::before{background:var(--warn)}
+.pill.err{background:rgba(248,113,113,.14);color:#fca5a5}.pill.err::before{background:var(--err)}
+.pill.info{background:var(--accent-soft);color:#93c5fd}.pill.info::before{background:var(--accent)}
+.pill.violet{background:rgba(167,139,250,.14);color:#c4b5fd}.pill.violet::before{background:var(--violet)}
+.pill.gray{background:rgba(148,163,184,.14);color:#94a3b8}.pill.gray::before{background:#475569}
+.pill.pulse::before{animation:pulse 1.6s infinite}
+/* ---------- 按钮 ---------- */
+button{font-family:inherit;cursor:pointer}
+.btn{display:inline-flex;align-items:center;gap:6px;border:0;border-radius:var(--r-sm);
+  padding:6px 14px;font-size:13px;color:#fff;background:linear-gradient(180deg,var(--accent),#3a6fd8);
+  transition:.15s;box-shadow:0 2px 8px rgba(79,140,255,.25)}
+.btn:hover{filter:brightness(1.08)}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--text-2);border:1px solid var(--line);box-shadow:none}
+.btn.ghost:hover{color:var(--text);border-color:#334155;background:rgba(255,255,255,.03)}
+.btn.danger{background:linear-gradient(180deg,#dc4c4c,#b93636);box-shadow:0 2px 8px rgba(248,113,113,.2)}
+.btn.sm{padding:3px 10px;font-size:12px;border-radius:6px}
+.btn.wide{width:100%;justify-content:center}
+.icon-btn{border:0;background:transparent;color:var(--text-3);cursor:pointer;padding:4px;border-radius:6px}
+.icon-btn:hover{color:var(--text);background:rgba(255,255,255,.06)}
+/* ---------- 表单 ---------- */
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:12px;color:var(--text-2)}
+.field input,.field select,.field textarea{
+  background:var(--bg-soft);border:1px solid var(--line);border-radius:var(--r-sm);
+  color:var(--text);padding:8px 11px;font-size:13.5px;font-family:inherit;transition:.15s
+}
+.field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.form-row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:720px){.grid-2{grid-template-columns:1fr}}
+/* ---------- Run 卡片 ---------- */
+.run-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);margin-bottom:12px;overflow:hidden}
+.run-card:hover{border-color:#2e4468}
+.run-head{display:flex;align-items:center;gap:14px;padding:14px 18px;flex-wrap:wrap}
+.run-id{font-family:var(--mono);font-size:14px;font-weight:600}
+.run-meta{color:var(--text-3);font-size:12px}
+.run-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+.run-bar{height:3px;background:var(--line-soft)}
+.run-bar .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .4s}
+.run-detail{padding:18px;border-top:1px solid var(--line-soft);background:var(--bg-soft)}
+/* ---------- 连接卡 ---------- */
+.conn{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.conn .card{margin:0}
+.conn .backend{font-family:var(--mono);font-size:13px;font-weight:600}
+.conn .cmd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-family:var(--mono);font-size:12px;color:var(--accent-2);overflow-x:auto}
+/* ---------- Teams ---------- */
+.team-tile{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:14px 18px}
+.pool-tag{display:inline-flex;align-items:center;gap:5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:12px;margin:2px}
+.pool-tag b{color:var(--accent-2);font-weight:600}
+.pool-rows .pool-row{display:grid;grid-template-columns:1.3fr 1fr 1.4fr .8fr .8fr auto;gap:10px;align-items:end;margin-bottom:10px}
+@media(max-width:860px){.pool-rows .pool-row{grid-template-columns:1fr 1fr}}
+/* ---------- Toast ---------- */
+#toasts{position:fixed;right:18px;bottom:18px;z-index:99;display:flex;flex-direction:column;gap:8px}
+.toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--accent);
+  border-radius:8px;padding:10px 16px;min-width:240px;max-width:360px;font-size:13px;box-shadow:var(--shadow);animation:slidein .2s}
+.toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--err)} .toast.warn{border-left-color:var(--warn)}
+@keyframes slidein{from{transform:translateX(20px);opacity:0}to{transform:none;opacity:1}}
+/* ---------- 细节 ---------- */
+.progress-note{font-size:12px;color:var(--text-3);text-align:center;padding:30px}
+.spin{width:26px;height:26px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:rot .8s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+.detail-section{margin-bottom:22px}
+.detail-section h4{font-size:13px;color:var(--text-2);font-weight:600;margin-bottom:8px}
+.empty{color:var(--text-3);font-size:12.5px;padding:16px 0;text-align:center}
+.ev-row{display:flex;gap:10px;padding:5px 0;border-bottom:1px dashed var(--line-soft);font-size:12.5px}
+.ev-row .t{color:var(--text-3);font-family:var(--mono);font-size:11px;white-space:nowrap}
+.ev-row .k{color:var(--accent-2);font-family:var(--mono);font-size:11px;white-space:nowrap;min-width:140px}
+.tabs-mini{display:flex;gap:4px;margin:8px 0}
+.tabs-mini button{border:1px solid transparent;background:transparent;color:var(--text-3);padding:4px 10px;border-radius:6px;font-size:12.5px}
+.tabs-mini button.active{color:var(--text);background:var(--accent-soft);border-color:var(--line)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><span class="dot"></span>Agent Hub 编排控制台</div>
+  <nav>
+    <button data-tab="runs" class="active">运行管理</button>
+    <button data-tab="teams">Agent 团队</button>
+    <button data-tab="connections">厂商连接</button>
+  </nav>
+  <div class="head-meta"><span class="live"></span><span id="projPath" class="chip"></span></div>
+</header>
+
+<!-- ============ Runs ============ -->
+<main id="view-runs" class="active">
+  <div class="view-head"><h2>运行管理</h2><span class="sub">每个 Run 使用所选团队启动常驻调度服务（serve）</span></div>
+
+  <div class="stat-grid" id="runsStats">
+    <div class="stat"><div class="k">Run 总数</div><div class="v accent" id="stTotal">–</div></div>
+    <div class="stat"><div class="k">运行中 serve</div><div class="v ok" id="stRunning">–</div></div>
+    <div class="stat"><div class="k">任务总数</div><div class="v" id="stTasks">–</div></div>
+    <div class="stat"><div class="k">已完成任务</div><div class="v ok" id="stDone">–</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h3>新建 Run</h3><span class="grow"><button class="ghost btn sm" id="toggleNewRun">展开 / 收起</button></span></div>
+    <div class="card-b" id="newRunBox" style="display:none">
+      <form class="form-row" id="newRunForm">
+        <div class="field"><label>Run 标识（留空自动生成）</label><input name="run_id" placeholder="run-my-project" style="min-width:240px"></div>
+        <div class="field"><label>团队（team）</label><select name="team_id" style="min-width:200px"></select></div>
+        <button class="btn" type="submit" style="margin-left:auto">创建 Run</button>
+      </form>
+    </div>
+  </div>
+
+  <div style="margin-top:16px" id="runList"></div>
+</main>
+
+<!-- ============ Teams ============ -->
+<main id="view-teams">
+  <div class="view-head"><h2>Agent 团队</h2><span class="sub">用鼠标组建项目临时团队，或选择默认团队</span></div>
+
+  <div class="card">
+    <div class="card-h"><h3>组建临时团队</h3></div>
+    <div class="card-b">
+      <div class="field" style="max-width:300px;margin-bottom:12px"><label>团队标识 team_id</label>
+        <input id="newTeamId" value="ad-hoc-team"></div>
+      <div class="pool-rows" id="poolRows"></div>
+      <div class="form-row" style="margin-top:8px">
+        <button class="ghost btn" id="addPool">＋ 添加 Agent 池</button>
+        <span style="margin-left:auto" class="form-row">
+          <button class="ghost btn" id="saveTeam">保存到 .agent-hub/teams</button>
+          <button class="danger ghost btn" id="saveAsDefault" style="border-color:rgba(248,113,113,.4);color:#fca5a5">设为默认（覆盖 config/team.yaml）</button>
+        </span>
+      </div>
+      <div style="margin-top:14px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px">
+        <div class="muted" style="margin-bottom:6px">配置预览（JSON）</div>
+        <pre id="teamPreview" style="white-space:pre-wrap;font-family:var(--mono);font-size:12px;color:var(--accent-2)"></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-h"><h3>可用团队</h3></div>
+    <div class="card-b" style="padding:6px 8px">
+      <div id="teamsList"></div>
+    </div>
+  </div>
+</main>
+
+<!-- ============ Connections ============ -->
+<main id="view-connections">
+  <div class="view-head"><h2>厂商连接</h2><span class="sub">探测登录态并引导登录 · 本页不存储任何 token / 凭证</span></div>
+  <div class="conn" id="connList"></div>
+</main>
+
+<div id="toasts"></div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const $$=s=>[...document.querySelectorAll(s)];
+let currentRun="";
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const mono=v=>`<span class="mono">${esc(v)}</span>`;
+
+async function api(path,opt){try{const r=await fetch(path,opt);const d=await r.json().catch(()=>({}));return{status:r.status,body:d};}catch(e){return{status:0,body:{error:String(e)}};}}
+function toast(msg,kind="info"){const t=document.createElement("div");t.className="toast "+kind;t.textContent=msg;
+  $("#toasts").appendChild(t);setTimeout(()=>t.remove(),kind==="err"?5000:2800);}
+
+const STATE_PILL={COMPLETED:["ok","已完成"],SUCCEEDED:["ok","成功"],APPLIED:["ok","已应用"],SENT:["ok","已投递"],
+  REVIEW:["info","待审核"],RUNNING:["ok","运行中"],READY:["violet","就绪"],ACTIVE:["info","执行中"],PENDING:["violet","排队中"],
+  APPROVED:["ok","已批准"],INTEGRATION:["info","集成中"],CANCELLED:["warn","已取消"],CANCEL_REQUESTED:["warn","取消中"],
+  FAILED:["err","失败"],BLOCKED:["err","阻塞"],REJECTED:["err","已拒绝"]};
+function pill(state){const s=String(state??"").toUpperCase();const p=STATE_PILL[s]||["gray",state??""];return `<span class="pill ${p[0]}">${esc(p[1])}</span>`;}
+
+/* ============ 导航 ============ */
+$$("nav button").forEach(b=>b.onclick=()=>{
+  $$("nav button").forEach(x=>x.classList.toggle("active",x===b));
+  $$("main").forEach(m=>m.classList.toggle("active",m.id==="view-"+b.dataset.tab));
+  if(b.dataset.tab==="runs")loadRuns();
+  if(b.dataset.tab==="teams")loadTeams();
+  if(b.dataset.tab==="connections")loadConnections();
+});
+
+/* ============ Runs ============ */
+async function loadRuns(){
+  const r=await api("/api/runs"); if(r.status!==200){return;}
+  const runs=r.body.runs||[];const teamSel=$('select[name=team_id]');
+  const have=new Set([...teamSel.options].map(o=>o.value));
+  const t=await api("/api/teams");
+  for(const team of(t.body.teams||[]))if(!have.has(team.team_id)){
+    const o=document.createElement("option");o.value=team.team_id;o.textContent=team.team_id;teamSel.appendChild(o);}
+  const total=runs.length,running=runs.filter(x=>x.running).length;
+  const tasks=runs.reduce((a,x)=>a+(x.tasks_total||0),0),done=runs.reduce((a,x)=>a+(x.tasks_completed||0),0);
+  $("#stTotal").textContent=total;$("#stRunning").textContent=running;
+  $("#stTasks").textContent=tasks;$("#stDone").textContent=done;
+  const box=$("#runList");
+  if(!runs.length){box.innerHTML=`<div class="card"><div class="empty">还没有 Run —— 在上方创建第一个 Run</div></div>`;return;}
+  box.innerHTML="";
+  for(const run of runs){
+    const totalN=run.tasks_total||0,doneN=run.tasks_completed||0;
+    const pct=totalN?Math.round(doneN/totalN*100):0;
+    const div=document.createElement("div");div.className="run-card";
+    div.innerHTML=`
+      <div class="run-bar"><div class="fill" style="width:${pct}%"></div></div>
+      <div class="run-head">
+        <span class="run-id">${mono(run.run_id)}</span>
+        ${run.running?'<span class="pill ok pulse">serve 运行中</span>':'<span class="pill gray">serve 未启动</span>'}
+        <span class="run-meta">团队：${esc(run.team_id)} · 创建 ${esc((run.created_at||"").slice(0,19).replace("T"," "))} · 任务 ${doneN}/${totalN}</span>
+        <span class="run-actions">
+          ${run.running
+            ?`<button class="btn danger sm" data-stop="${esc(run.run_id)}">停止 serve</button>`
+            :`<button class="ghost btn sm" data-start="${esc(run.run_id)}">启动 serve</button>`}
+          <button class="ghost btn sm" data-open="${esc(run.run_id)}">详情</button>
+        </span>
+      </div>
+      <div class="run-detail" style="display:none" data-detail="${esc(run.run_id)}"></div>`;
+    div.querySelector("[data-open]").onclick=()=>openRun(run.run_id,div);
+    div.querySelector("[data-start]").onclick=()=>startServe(run.run_id);
+    div.querySelector("[data-stop]").onclick=()=>stopServe(run.run_id);
+    if(currentRun===run.run_id)openRun(run.run_id,div,false);
+    box.appendChild(div);
+  }
+}
+$("#toggleNewRun").onclick=()=>{$("#newRunBox").style.display=$("#newRunBox").style.display==="none"?"block":"none";};
+$("#newRunForm").addEventListener("submit",async e=>{e.preventDefault();
+  const body={};for(const[k,v]of new FormData(e.target).entries())if(v)body[k]=v;
+  const r=await api("/api/runs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(r.status===200){toast("Run 已创建："+r.body.run_id,"ok");loadRuns();}
+  else toast(r.body.error||"创建失败","err");});
+async function startServe(runId){
+  const teamPath=prompt(`选择启动 ${runId} 的团队配置文件\n（项目相对路径，回车用默认）：`,"config/team.yaml");
+  if(teamPath===null)return;
+  const r=await api(`/api/runs/${runId}/serve/start`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({team_path:teamPath})});
+  if(r.status===200){toast(runId+" serve 已启动","ok");}
+  else toast(r.body.error||"启动失败","err");
+  loadRuns();setTimeout(loadRuns,2000);}
+async function stopServe(runId){
+  await api(`/api/runs/${runId}/serve/stop`,{method:"POST",body:"{}"});
+  toast(runId+" serve 已停止");loadRuns();}
+
+async function openRun(runId,cardEl,scroll=true){
+  currentRun=runId;
+  if(cardEl)$$(".run-detail").forEach(d=>d.style.display="none");
+  const detail=cardEl?cardEl.querySelector(".run-detail"):null;
+  if(detail){detail.style.display="block";if(scroll)detail.scrollIntoView({behavior:"smooth",block:"nearest"});}
+  await Promise.all([loadSummary(runId),loadDetail(runId)]);
+}
+async function loadSummary(runId){
+  const r=await api(`/api/runs/${runId}/summary`);if(r.status!==200)return;
+  const s=r.body||{};return s;}
+async function loadDetail(runId){
+  const box=$(".run-detail[data-detail='"+runId+"']");if(!box)return;
+  const [tasks,appr,mg,events]=await Promise.all([
+    api(`/api/runs/${runId}/tasks`),api(`/api/runs/${runId}/approvals`),
+    api(`/api/runs/${runId}/merges`),api(`/api/runs/${runId}/events`)]);
+  box.innerHTML=`
+    <div class="form-row" style="margin-bottom:14px">
+      <button class="ghost btn sm" data-action="new">＋ 发起任务</button>
+      <button class="ghost btn sm" data-action="pause">暂停调度</button>
+      <button class="ghost btn sm" data-action="resume">恢复调度</button>
+      <button class="ghost btn sm" data-action="refresh">刷新</button>
+    </div>
+    <div class="detail-section">
+      <h4>任务</h4><div style="overflow-x:auto"><table>
+      <thead><tr><th>任务</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th></th></tr></thead>
+      <tbody>${
+        (tasks.body.tasks||[]).map(t=>`<tr><td class="mono">${esc(t.task_id)}</td>
+          <td>${pill(t.state)}</td><td>${esc(t.access_mode)}</td>
+          <td class="muted">${esc((t.write_scope_json||"").slice(0,40))}</td>
+          <td>${t.attempt_count??""}</td>
+          <td>${t.state!=="COMPLETED"&&t.state!=="CANCELLED"?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:""}</td></tr>`).join("")||`<tr><td colspan="6" class="empty">暂无任务</td></tr>`
+      }</tbody></table></div>
+    </div>
+    <div class="detail-section"><h4>审批请求</h4>
+      ${appr.body.approvals?.length?`<div style="overflow-x:auto"><table>
+        <thead><tr><th>审批</th><th>任务</th><th>说明</th><th>范围</th><th>状态</th></tr></thead><tbody>
+        ${(appr.body.approvals||[]).map(a=>`<tr><td class="mono">${esc(a.request_id)}</td>
+          <td class="mono">${esc(a.task_id||"")}</td><td>${esc((a.action_summary||"").slice(0,60))}</td>
+          <td class="muted">${esc(a.scope||"")}</td><td>${pill(a.status)}</td></tr>`).join("")}
+        </tbody></table></div>`:'<div class="empty">暂无审批请求</div>'}
+    </div>
+    <div class="detail-section"><h4>合并队列</h4>
+      ${mg.body.merges?.length?`<div style="overflow-x:auto"><table>
+        <thead><tr><th>任务</th><th>提交</th><th>状态</th></tr></thead><tbody>
+        ${(mg.body.merges||[]).map(m=>`<tr><td class="mono">${esc(m.task_id)}</td>
+          <td class="mono">${esc((m.result_commit||"").slice(0,10))}</td><td>${pill(m.status)}</td></tr>`).join("")}
+        </tbody></table></div>`:'<div class="empty">合并队列为空</div>'}
+    </div>
+    <div class="detail-section"><h4>事件时间线（最近 40）</h4>
+      ${(events.body.events||[]).slice(-40).reverse().map(ev=>`
+        <div class="ev-row"><span class="t">${esc((ev.created_at||"").slice(11,19))}</span>
+        <span class="k">${esc(ev.kind)}</span><span>${esc((ev.task_id||"")+" ")}${esc(String(ev.payload_json||"").slice(0,80))}</span></div>`).join("")||'<div class="empty">暂无事件</div>'}
+    </div>`;
+  box.querySelector('[data-action="new"]').onclick=()=>{
+    const p=prompt("任务说明 prompt：");
+    if(p===null)return;
+    const mode=confirm("写任务（需要受管 worktree）？\n确定=写，取消=只读")?"write":"read_only";
+    api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({prompt:p,access_mode:mode,cwd:mode==="write"?prompt("cwd（受管 worktree 路径）",""):undefined})})
+      .then(r=>r.status===200?(toast("任务已发起","ok"),loadDetail(runId)):toast(r.body.error,"err"));};
+  box.querySelector('[data-action="pause"]').onclick=()=>control(runId,"pause");
+  box.querySelector('[data-action="resume"]').onclick=()=>control(runId,"resume");
+  box.querySelector('[data-action="refresh"]').onclick=()=>loadDetail(runId);
+  box.querySelectorAll("[data-cancel]").forEach(b=>b.onclick=async()=>{
+    const r=await api(`/api/runs/${runId}/tasks/${b.dataset.cancel}/cancel`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-cancel"})});
+    if(r.status===200){toast("已请求取消","ok");loadDetail(runId);}else toast(r.body.error,"err");});
+}
+async function control(runId,action){
+  const r=await api(`/api/runs/${runId}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-"+action})});
+  if(r.status===200)toast(action==="pause"?"已暂停调度":"已恢复调度","ok");else toast(r.body.error,"err");}
+
+/* ============ Teams ============ */
+const BACKENDS=[["fake","Fake（离线）"],["codex","OpenAI Codex"],["codebuddy","CodeBuddy（中国站）"]];
+const ROLES=[["worker","Worker 执行"],["supervisor","Supervisor 审核"]];
+let poolRows=[{backend:"fake",role_id:"worker",pool_id:"pool-fake",count:2,max_count:2}];
+
+function poolRowHTML(p){
+  return `<div class="pool-row">
+    <div class="field"><label>后端</label><select class="p-backend">${BACKENDS.map(([v,l])=>`<option value="${v}"${v===p.backend?" selected":""}>${l}</option>`).join("")}</select></div>
+    <div class="field"><label>角色</label><select class="p-role">${ROLES.map(([v,l])=>`<option value="${v}"${v===(p.role_id||"worker")?" selected":""}>${l}</option>`).join("")}</select></div>
+    <div class="field"><label>池标识 pool_id</label><input class="p-id" value="${esc(p.pool_id||"")}" placeholder="pool-1"></div>
+    <div class="field"><label>初始数</label><input class="p-count" type="number" min="1" value="${p.count||1}"></div>
+    <div class="field"><label>上限</label><input class="p-max" type="number" min="1" value="${p.max_count||p.count||1}"></div>
+    <button class="ghost btn sm" data-del style="margin-bottom:2px">删除</button></div>`;
+}
+function renderPoolRows(){
+  const box=$("#poolRows");box.innerHTML="";
+  poolRows.forEach((p,i)=>{const d=document.createElement("div");d.innerHTML=poolRowHTML(p);
+    d.querySelector("[data-del]").onclick=()=>{poolRows.splice(i,1);renderPoolRows();};box.appendChild(d);});
+  renderPreview();
+}
+function collectTeam(){
+  const pools=[...$("#poolRows").querySelectorAll(".pool-row")].map(row=>({
+    pool_id:row.querySelector(".p-id").value||("pool-"+Math.random().toString(16).slice(2,6)),
+    backend:row.querySelector(".p-backend").value,role_id:row.querySelector(".p-role").value,
+    count:Math.max(1,parseInt(row.querySelector(".p-count").value)||1),
+    max_count:Math.max(1,parseInt(row.querySelector(".p-max").value)||1)}));
+  return{schema_version:1,team_id:$("#newTeamId").value||"ad-hoc-team",bootstrap_supervisor:"supervisor",
+    roles:[{role_id:"worker",version:1,title:"实现 Worker",required_capabilities:["read","write","test"]},
+           {role_id:"supervisor",version:1,title:"Supervisor 审核",required_capabilities:["plan","review"]}],
+    agent_pools:pools};
+}
+function renderPreview(){$("#teamPreview").textContent=JSON.stringify(collectTeam(),null,2);}
+$("#newTeamId").addEventListener("input",renderPreview);
+$("#addPool").onclick=()=>{poolRows.push({backend:"fake",role_id:"worker",count:1,max_count:1});renderPoolRows();};
+async function loadTeams(){
+  renderPoolRows();
+  const t=await api("/api/teams");const list=$("#teamsList");
+  list.innerHTML="";
+  for(const team of(t.body.teams||[])){
+    const pools=team.team?team.team.agent_pools||[]:[];
+    const div=document.createElement("div");div.className="team-tile";
+    div.innerHTML=`<div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:6px">
+          <b>${esc(team.team_id)}</b>
+          <span class="pill ${team.source==="default"?"violet":"info"}">${team.source==="default"?"默认":"已保存"}</span>
+        </div>
+        <div>${pools.map(p=>`<span class="pool-tag"><b>${esc(p.backend)}</b> ×${p.count} · ${esc(p.role_id)}</span>`).join("")||'<span class="muted">默认 config/team.yaml</span>'}</div>
+      </div>
+      <div class="run-actions">
+        ${pools.length?`<button class="ghost btn sm" data-edit='${esc(JSON.stringify(team.team||{}))}'>载入编辑器</button>`:""}
+      </div>`;
+    if(pools.length)div.querySelector("[data-edit]").onclick=()=>{
+      const data=JSON.parse(div.querySelector("[data-edit]").dataset.edit.replace(/&quot;/g,'"'));
+      $("#newTeamId").value=data.team_id;
+      poolRows=(data.agent_pools||[]).map(p=>({backend:p.backend,role_id:p.role_id,pool_id:p.pool_id,count:p.count,max_count:p.max_count}));
+      renderPoolRows();};
+    list.appendChild(div);
+  }
+}
+async function saveTeam(asDefault){
+  const team=collectTeam();
+  const r=await api("/api/teams",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({team,as_default:asDefault})});
+  if(r.status===200){toast(asDefault?"已设为默认团队":"团队已保存："+team.team_id,"ok");loadTeams();}
+  else toast(r.body.error||"保存失败","err");
+}
+$("#saveTeam").onclick=()=>saveTeam(false);
+$("#saveAsDefault").onclick=()=>{if(confirm("将覆盖项目 config/team.yaml（默认团队），继续？"))saveTeam(true);};
+
+/* ============ Connections ============ */
+async function loadConnections(){
+  const c=await api("/api/connections");const box=$("#connList");
+  box.innerHTML="";
+  for(const x of(c.body.connections||[])){
+    const div=document.createElement("div");div.className="card";div.style.margin=0;
+    div.innerHTML=`<div class="card-b">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span class="backend">${esc(x.backend)}</span>
+        ${x.cli_available?'<span class="pill ok">CLI 可用</span>':'<span class="pill err">未找到 CLI</span>'}
+      </div>
+      <div class="muted" style="margin-bottom:10px">${esc(x.label)}</div>
+      <div style="margin-bottom:6px" class="form-row"><span class="muted">版本</span><span class="mono">${esc(x.version||"—")}</span></div>
+      ${x.login_command?`<div class="muted" style="margin-bottom:4px">登录命令（终端执行后返回刷新）</div>
+        <div class="cmd">${esc(x.login_command)}</div>`:`<div class="muted">${esc(x.note||"")}</div>`}
+    </div>`;
+    box.appendChild(div);
+  }
+}
+
+/* ============ 启动 ============ */
+(async function(){
+  const st=await api("/api/status");
+  if(st.body.project_root)$("#projPath").textContent=st.body.project_root;
+  await loadRuns();loadTeams();loadConnections();
+  const init=st.body.run_id;
+  if(init){currentRun=init;const card=$("[data-detail='"+init+"']");if(card){/* 已渲染时自动展开 */}}
+  setInterval(()=>{if($("nav button.active").dataset.tab==="runs")loadRuns();},8000);
+})();
+</script>
+</body>
+</html>
