@@ -152,7 +152,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _get_connections(self) -> None:
         from orchestrator.console.settings import probe_connections
 
-        self._send_json({"connections": probe_connections()})
+        self._send_json(
+            {"connections": probe_connections(self.server.project_root)}
+        )
 
     def _get_teams(self) -> None:
         from orchestrator.console.settings import list_saved_teams

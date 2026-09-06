@@ -458,14 +458,19 @@ async function loadConnections(){
   for(const x of(c.body.connections||[])){
     const div=document.createElement("div");div.className="card";div.style.margin=0;
     div.innerHTML=`<div class="card-b">
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap">
         <span class="backend">${esc(x.backend)}</span>
         ${x.cli_available?'<span class="pill ok">CLI 可用</span>':'<span class="pill err">未找到 CLI</span>'}
+        ${x.logged_in===true?'<span class="pill violet">已登录</span>':(x.logged_in===false?'<span class="pill warn">未登录</span>':'')}
       </div>
       <div class="muted" style="margin-bottom:10px">${esc(x.label)}</div>
       <div style="margin-bottom:6px" class="form-row"><span class="muted">版本</span><span class="mono">${esc(x.version||"—")}</span></div>
-      ${x.login_command?`<div class="muted" style="margin-bottom:4px">登录命令（终端执行后返回刷新）</div>
-        <div class="cmd">${esc(x.login_command)}</div>`:`<div class="muted">${esc(x.note||"")}</div>`}
+      ${x.cli_path?`<div class="muted" style="margin-bottom:6px;word-break:break-all">路径：<span class="mono">${esc(x.cli_path)}</span></div>`:""}
+      ${x.login_command?`<div class="muted" style="margin:8px 0 4px">登录方式（在 WorkBuddy 客户端或终端完成，本页不接触凭证）</div>
+        <div class="cmd">${esc(x.login_command)}</div>
+        ${x.login_status_hint?`<div class="muted" style="margin-top:6px">${esc(x.login_status_hint)}</div>`:""}
+        <div class="muted" style="margin-top:8px">${esc(x.note||"")}</div>`
+        :`<div class="muted">${esc(x.note||"")}</div>`}
     </div>`;
     box.appendChild(div);
   }

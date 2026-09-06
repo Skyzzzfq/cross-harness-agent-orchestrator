@@ -97,47 +97,117 @@ def list_saved_teams(project_root: Path) -> list[dict[str, Any]]:
     return teams
 
 
-def _tool_version(executable: str, *args: str) -> str | None:
+def _local_cli_path(project_root: Path, *names: str) -> Path | None:
+    """项目内受管 CLI：.agent-hub/tools/node_modules/.bin/<name>。
+
+    Windows 优先 .cmd（无扩展名的是 bash shim，subprocess 无法直接执行）；
+    非 Windows 优先无扩展名可执行文件。
+    """
+    import sys
+
+    bin_dir = project_root / ".agent-hub" / "tools" / "node_modules" / ".bin"
+    win = sys.platform == "win32"
+    for name in names:
+        candidates = (
+            [bin_dir / f"{name}.cmd", bin_dir / f"{name}.ps1", bin_dir / name]
+            if win
+            else [bin_dir / name, bin_dir / f"{name}.cmd"]
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _run_version(cli: str | Path, *args: str) -> str | None:
     try:
         result = subprocess.run(
-            [executable, *args],
+            [str(cli), *args],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
             check=False,
         )
-        return result.stdout.strip().splitlines()[0].strip() or None
+        out = (result.stdout or "") + (result.stderr or "")
+        for line in out.splitlines():
+            line = line.strip()
+            if line and not line.startswith("-"):
+                return line[:80]
+        return None
     except (OSError, subprocess.SubprocessError):
         return None
 
 
-def probe_connections() -> list[dict[str, Any]]:
-    """探测各后端的 CLI/登录可达性（只探测不存储任何秘密）。"""
-    codex_cli = _tool_version("codex", "--version")
-    codebuddy_cli = _tool_version("codebuddy", "--version")
+def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
+    """探测各后端 CLI 可达性（只探测版本/存在性，绝不读取或打印凭证）。
+
+    Codex：PATH 上的 codex，或项目 .agent-hub/tools 内。
+    CodeBuddy：项目 .agent-hub/tools/node_modules/.bin/codebuddy（受管安装），
+              也兼容 PATH 上的 codebuddy；用 AGENT_HUB_CODEBUDDY_BIN 覆盖。
+    登录态需要用户在终端完成（CodeBuddy 认证目录不被网页触碰）。
+    """
+    root = project_root or Path.cwd()
+    import os
+
+    # Codex
+    codex_cli = shutil.which("codex")
+    codex_local = _local_cli_path(root, "codex")
+    codex_path = codex_cli or (str(codex_local) if codex_local else None)
+    codex_version = _run_version(codex_path, "--version") if codex_path else None
+    codex_login = (
+        _run_version(codex_path, "login", "status") if codex_path else None
+    )
+    codex_logged_in = bool(codex_login and "logged in" in codex_login.lower())
+
+    # CodeBuddy：显式环境变量 > 项目受管安装 > PATH
+    codebuddy_path: str | None = (
+        os.environ.get("AGENT_HUB_CODEBUDDY_BIN")
+        or os.environ.get("CODEBUDDY_CODE_PATH")
+        or None
+    )
+    if not codebuddy_path or not Path(codebuddy_path).is_file():
+        cb_local = _local_cli_path(root, "codebuddy", "codebuddy-code")
+        if cb_local:
+            codebuddy_path = str(cb_local)
+        else:
+            codebuddy_path = shutil.which("codebuddy")
+    codebuddy_version = (
+        _run_version(codebuddy_path, "--version") if codebuddy_path else None
+    )
+
     return [
         {
             "backend": "codex",
             "label": "OpenAI Codex",
-            "cli_available": codex_cli is not None,
-            "version": codex_cli,
+            "cli_available": codex_version is not None,
+            "version": codex_version,
+            "cli_path": codex_path,
+            "logged_in": codex_logged_in,
             "login_command": "codex login",
-            "note": "需要 ChatGPT Plus saved login；登录后在终端执行命令，然后回到本页刷新。",
+            "login_status_hint": (
+                f"检测到已登录：{codex_login}" if codex_logged_in
+                else "终端执行 `codex login status` 查看；未登录请运行 `codex login`。"
+            ),
+            "note": "需要 ChatGPT Plus saved login。在终端 `codex login` 完成登录后回到本页刷新。",
         },
         {
             "backend": "codebuddy",
             "label": "CodeBuddy Code（中国站）",
-            "cli_available": codebuddy_cli is not None,
-            "version": codebuddy_cli,
-            "login_command": "codebuddy login",
-            "note": "需要中国站 internal 环境登录态。",
+            "cli_available": codebuddy_version is not None,
+            "version": codebuddy_version,
+            "cli_path": codebuddy_path,
+            "login_command": "codebuddy login（或在 WorkBuddy 客户端内登录中国站账号）",
+            "login_status_hint": "当前认证状态由 CodeBuddy 客户端/CLI 管理；登录后即可被编排器调用。",
+            "note": "需要中国站 internal 环境登录态。CLI 已随项目安装在 .agent-hub/tools；登录请在 WorkBuddy 客户端或终端完成。",
         },
         {
             "backend": "fake",
             "label": "Fake（离线演示）",
             "cli_available": True,
             "version": "built-in",
+            "cli_path": None,
             "login_command": None,
-            "note": "无需账号，用于离线跑通流程。",
+            "login_status_hint": None,
+            "note": "无需账号，用于离线跑通流程与界面演示。",
         },
     ]
