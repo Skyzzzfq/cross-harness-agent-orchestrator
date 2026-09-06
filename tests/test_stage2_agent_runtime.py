@@ -37,7 +37,11 @@ from orchestrator.core.state_machine import (
     ensure_agent_transition,
     ensure_session_transition,
 )
-from orchestrator.storage.sqlite_store import FencedControllerError, SQLiteStateStore
+from orchestrator.storage.sqlite_store import (
+    CURRENT_SCHEMA_VERSION,
+    FencedControllerError,
+    SQLiteStateStore,
+)
 
 
 class AgentRuntimeStateMachineTests(unittest.TestCase):
@@ -205,7 +209,7 @@ class SchemaMigrationTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "PRAGMA user_version"
                 ).fetchone()[0]
-                self.assertEqual(version, 12)
+                self.assertEqual(version, CURRENT_SCHEMA_VERSION)
                 tables = {
                     row[0]
                     for row in migrated.connection.execute(
@@ -240,7 +244,7 @@ class SchemaMigrationTests(unittest.TestCase):
             with SQLiteStateStore(database) as migrated:
                 self.assertEqual(
                     migrated.connection.execute("PRAGMA user_version").fetchone()[0],
-                    12,
+                    CURRENT_SCHEMA_VERSION,
                 )
                 self.assertIsNotNone(
                     migrated.connection.execute(

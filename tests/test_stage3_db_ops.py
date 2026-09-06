@@ -5,7 +5,10 @@ import unittest
 from pathlib import Path
 
 from orchestrator.db_ops import backup_database, restore_database, verify_database
-from orchestrator.storage.sqlite_store import SQLiteStateStore
+from orchestrator.storage.sqlite_store import (
+    SQLiteStateStore,
+    CURRENT_SCHEMA_VERSION,
+)
 
 
 class DatabaseBackupRestoreTests(unittest.TestCase):
@@ -44,7 +47,7 @@ class DatabaseBackupRestoreTests(unittest.TestCase):
         check = verify_database(self.db_path)
         self.assertEqual(check["integrity_check"], "ok")
         self.assertEqual(check["foreign_key_errors"], 0)
-        self.assertEqual(check["schema_version"], 12)
+        self.assertEqual(check["schema_version"], CURRENT_SCHEMA_VERSION)
 
         restored = SQLiteStateStore(self.db_path)
         try:
@@ -63,7 +66,7 @@ class DatabaseBackupRestoreTests(unittest.TestCase):
         result = verify_database(self.db_path)
         self.assertEqual(result["integrity_check"], "ok")
         self.assertEqual(result["foreign_key_errors"], 0)
-        self.assertEqual(result["schema_version"], 12)
+        self.assertEqual(result["schema_version"], CURRENT_SCHEMA_VERSION)
 
     def test_restore_missing_backup_raises(self) -> None:
         with self.assertRaises(FileNotFoundError):
@@ -84,7 +87,7 @@ class SchemaMigrationTests(unittest.TestCase):
         store = SQLiteStateStore(db)
         try:
             version = store.connection.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 12)
+            self.assertEqual(version, CURRENT_SCHEMA_VERSION)
         finally:
             store.close()
         check = verify_database(db)

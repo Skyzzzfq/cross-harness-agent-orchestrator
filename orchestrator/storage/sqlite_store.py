@@ -140,6 +140,10 @@ class FencedAuthorityError(RuntimeError):
     """Raised when a stale business supervisor (old authority epoch) acts."""
 
 
+# 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
+CURRENT_SCHEMA_VERSION = 13
+
+
 class SQLiteStateStore:
     # B3（P1-06）：Outbox 投递失败的最大重试次数，超过进入死信
     MAX_OUTBOX_ATTEMPTS = 5
@@ -897,6 +901,8 @@ class SQLiteStateStore:
                   AND d.available_at <= ?
                   AND r.control_state = 'RUNNING'
                   AND d.paused = 0
+                  AND (d.required_backend IS NULL OR d.required_backend = ''
+                       OR d.required_backend = a.backend)
                 ORDER BY d.priority DESC, t.created_at, t.task_id,
                          a.created_at, a.agent_id
                 """,
@@ -3930,6 +3936,7 @@ class SQLiteStateStore:
         write_scope: tuple[str, ...] = (),
         max_attempts: int = 2,
         required_role_id: str = "worker",
+        required_backend: str | None = None,
         prompt: str | None = None,
         cwd: str = ".",
         timeout_seconds: float = 60,
@@ -3942,6 +3949,7 @@ class SQLiteStateStore:
             access_mode=access_mode,
             max_attempts=max_attempts,
             required_role_id=required_role_id,
+            required_backend=required_backend,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             retry_backoff_base_seconds=retry_backoff_base_seconds,
@@ -3971,6 +3979,7 @@ class SQLiteStateStore:
                 write_scope=write_scope,
                 max_attempts=max_attempts,
                 required_role_id=required_role_id,
+                required_backend=required_backend,
                 prompt=prompt,
                 cwd=cwd,
                 timeout_seconds=timeout_seconds,
@@ -3994,6 +4003,7 @@ class SQLiteStateStore:
             "write_scope",
             "max_attempts",
             "required_role_id",
+            "required_backend",
             "prompt",
             "cwd",
             "timeout_seconds",
@@ -4017,6 +4027,7 @@ class SQLiteStateStore:
                 "write_scope": tuple(raw.get("write_scope", ())),
                 "max_attempts": int(raw.get("max_attempts", 2)),
                 "required_role_id": str(raw.get("required_role_id", "worker")),
+                "required_backend": raw.get("required_backend"),
                 "prompt": raw.get("prompt"),
                 "cwd": str(raw.get("cwd", ".")),
                 "timeout_seconds": float(raw.get("timeout_seconds", 60)),
@@ -4146,6 +4157,7 @@ class SQLiteStateStore:
         timeout_seconds: float,
         retry_backoff_base_seconds: int,
         retry_backoff_max_seconds: int,
+        required_backend: str | None = None,
     ) -> None:
         if not task_id.strip():
             raise ValueError("task_id must not be empty")
@@ -4155,6 +4167,8 @@ class SQLiteStateStore:
             raise ValueError("max_attempts must be at least 1")
         if not required_role_id.strip():
             raise ValueError("required_role_id must not be empty")
+        if required_backend is not None and not required_backend.strip():
+            raise ValueError("required_backend must not be empty when provided")
         if not cwd.strip():
             raise ValueError("cwd must not be empty")
         if timeout_seconds <= 0:
@@ -4175,6 +4189,7 @@ class SQLiteStateStore:
         write_scope: tuple[str, ...],
         max_attempts: int,
         required_role_id: str,
+        required_backend: str | None,
         prompt: str | None,
         cwd: str,
         timeout_seconds: float,
@@ -4204,14 +4219,15 @@ class SQLiteStateStore:
         self.connection.execute(
             """
             INSERT INTO task_dispatch_specs(
-                task_id, required_role_id, instruction_text, cwd,
+                task_id, required_role_id, required_backend, instruction_text, cwd,
                 timeout_seconds, priority, available_at,
                 retry_backoff_base_seconds, retry_backoff_max_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 required_role_id,
+                required_backend,
                 prompt if prompt is not None else task_id,
                 cwd,
                 timeout_seconds,
@@ -4986,7 +5002,7 @@ class SQLiteStateStore:
 
     def _migrate_schema(self) -> None:
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 12:
+        if version > CURRENT_SCHEMA_VERSION:
             raise RuntimeError(f"database schema version {version} is newer than supported")
         if version < 2:
             with self.connection:
@@ -5055,6 +5071,8 @@ class SQLiteStateStore:
             self._migrate_to_v11()
         if version < 12:
             self._migrate_to_v12()
+        if version < 13:
+            self._migrate_to_v13()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -5533,6 +5551,25 @@ class SQLiteStateStore:
                 PRAGMA user_version=12;
                 """
             )
+
+    def _migrate_to_v13(self) -> None:
+        # 任务按厂商路由：任务可声明 required_backend（codex/codebuddy/fake），
+        # 派发时只绑定该后端的 agent；NULL/空表示任意后端（向后兼容）。
+        with self.connection:
+            cols = {
+                row["name"]
+                for row in self.connection.execute("PRAGMA table_info(task_dispatch_specs)")
+            }
+            if "required_backend" not in cols:
+                self.connection.execute(
+                    "ALTER TABLE task_dispatch_specs "
+                    "ADD COLUMN required_backend TEXT"
+                )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dispatch_backend "
+                "ON task_dispatch_specs(required_backend)"
+            )
+            self.connection.execute("PRAGMA user_version=13")
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(

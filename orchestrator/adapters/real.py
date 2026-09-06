@@ -282,6 +282,40 @@ class _CodexRunningCall(_BaseRunningCall):
 class CodeBuddyBackendAdapter:
     backend = "codebuddy"
 
+    def __init__(self) -> None:
+        # 认证检测每个进程只做一次：SDK 的 authenticate() 每次起 subprocess 探测
+        # 登录态，并发调用会竞态（已登录也可能误判 auth_url 需登录，并弹浏览器）。
+        import asyncio as _asyncio
+
+        self._auth_lock = _asyncio.Lock()
+        self._auth_ok: bool | None = None
+
+    async def _ensure_authenticated(self, cli_path: str) -> bool:
+        """串行化且只做一次的登录态检测；已认证则缓存，绝不重复弹浏览器。"""
+        if self._auth_ok is not None:
+            return self._auth_ok
+        async with self._auth_lock:
+            if self._auth_ok is not None:
+                return self._auth_ok
+            from codebuddy_agent_sdk import authenticate
+
+            auth = await authenticate(
+                environment=CODEBUDDY_REGION,
+                env=codebuddy_china_environment(),
+                codebuddy_code_path=cli_path,
+                timeout=30.0,
+            )
+            if auth.auth_url:
+                try:
+                    await auth.cancel()
+                except Exception:  # noqa: BLE001
+                    pass
+                self._auth_ok = False
+                return False
+            await auth
+            self._auth_ok = True
+            return True
+
     def capabilities(self) -> BackendCapabilities:
         version = None
         try:
@@ -310,7 +344,6 @@ class CodeBuddyBackendAdapter:
     async def start(self, request: AdapterCallRequest) -> _BaseRunningCall:
         from codebuddy_agent_sdk import (
             CodeBuddyAgentOptions,
-            authenticate,
             query,
         )
 
@@ -324,31 +357,34 @@ class CodeBuddyBackendAdapter:
                     retryable=False,
                 ),
             )
-        auth = await authenticate(
-            environment=CODEBUDDY_REGION,
-            env=codebuddy_china_environment(),
-            codebuddy_code_path=cli_path,
-            timeout=15.0,
-        )
-        if auth.auth_url:
-            await auth.cancel()
+        authenticated = await self._ensure_authenticated(cli_path)
+        if not authenticated:
             return _BlockedRunningCall(
                 request,
                 Failure(
                     kind="interactive_login_required",
-                    message="CodeBuddy requires interactive sign-in",
+                    message="CodeBuddy requires interactive sign-in (run CLI /login)",
                     retryable=False,
                 ),
             )
-        await auth
+        env = codebuddy_china_environment()
+        # 跳过 Git Bash 检测（编排场景不需要），消除 wmic 告警
+        env["CODEBUDDY_SKIP_GIT_BASH_CHECK"] = "1"
+        # 写任务给可编辑权限；只读任务 plan 模式。写边界由受管 worktree +
+        # WorkspacePolicy 在编排层控制，agent 只在受管 worktree 内活动。
+        perm = "acceptEdits" if request.policy.access_mode == "write" else "plan"
         options = CodeBuddyAgentOptions(
             cwd=request.policy.cwd,
             codebuddy_code_path=cli_path,
             max_turns=1,
-            permission_mode="plan",
+            permission_mode=perm,
+            allowed_tools=[],
+            disallowed_tools=[],
+            mcp_servers={},
+            extra_args=[],
             request_timeout_ms=int(request.policy.timeout_seconds * 1000),
             setting_sources=[],
-            env=codebuddy_china_environment(),
+            env=env,
         )
         return _CodeBuddyRunningCall(request, query, options)
 

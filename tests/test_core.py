@@ -28,7 +28,7 @@ from orchestrator.poc.git_demo import run_git_demo
 from orchestrator.poc.recovery_demo import run_recovery_demo
 from orchestrator.poc.real_demo import REQUIRED_REAL_CHECKS, assess_real_poc
 from orchestrator.storage.sqlite_store import SCHEMA, SQLiteStateStore
-from orchestrator.storage.sqlite_store import FencedAttemptError
+from orchestrator.storage.sqlite_store import CURRENT_SCHEMA_VERSION, FencedAttemptError
 from orchestrator.workspace.git_manager import GitCommandError, GitWorkspaceManager
 
 
@@ -442,7 +442,7 @@ class SQLiteMigrationTests(unittest.TestCase):
                 version = migrated.connection.execute(
                     "PRAGMA user_version"
                 ).fetchone()[0]
-                self.assertEqual(version, 12)
+                self.assertEqual(version, CURRENT_SCHEMA_VERSION)
 
 
 class FakeWalkingSkeletonTests(unittest.TestCase):
