@@ -44,20 +44,28 @@
 
 ## 自己上手（开发自用）
 
-环境就绪（见下方 `auth`）后，每天只需两步：
+**一键启动：双击仓库根目录的 `start.cmd`**（或命令行 `.\start.cmd`）。脚本会自动：
+
+1. 首次运行自动建 `.venv` + 装依赖（`scripts/bootstrap.py`）；
+2. 设置 CodeBuddy 中国站所需环境变量；
+3. 拉起网页控制台并自动打开浏览器 `http://127.0.0.1:8080`（端口已被占用时只开浏览器，不会重复起服务）。
+
+常用变体：
 
 ```powershell
-# 1) 起网页控制台 → 浏览器打开 http://127.0.0.1:8080
-#    Connections：探测 codex/codebuddy 登录态并给登录引导（不存储凭证）
-#    Teams：鼠标组建临时 team（backend/role/count 多池，可覆盖默认 config/team.yaml）
-#    Runs：列出/新建 Run，按 team 一键启动/停止后台 serve（日志 .agent-hub/logs/）
-.\.venv\Scripts\python.exe -m orchestrator console --port 8080
-
-# 2) 或命令行直接常驻调度（run-id / team 名可从控制台 Runs/Teams 页获得）
-.\.venv\Scripts\python.exe -m orchestrator serve-team --run <run-id> --team <team名>
+.\start.cmd                # 一键启动（等价上面三条）
+.\start.cmd serve run-1 config\team.yaml   # 额外把该 run 的调度器窗口一起拉起
+.\start.cmd check          # 只打印环境状态，不起服务
 ```
 
-> 注意：跑 codebuddy 任务时需先设两个环境变量（中国站），否则该后端任务会失败：
+进入控制台后的日常路径（无需再碰命令行）：
+
+- **Connections**：探测 codex/codebuddy 登录态，未登录按页面引导执行 `auth`；
+- **Teams**：鼠标组建临时 team（backend/role/count），或直接用默认 `config/team.yaml`（1 codex 主管 + 2 codebuddy worker）；
+- **Runs**：新建 Run → 一键启动/停止该 Run 的调度器（日志 `.agent-hub/logs/`）→ 发起任务 → 在任务详情里审批。
+
+> 注意：跑 codebuddy 任务时需设两个环境变量（中国站），否则该后端任务会失败——
+> `start.cmd` 已自动处理；若手动在终端跑 `console`/`serve-team`，请先执行：
 >
 > ```powershell
 > $env:CODEBUDDY_SKIP_GIT_BASH_CHECK = "1"
