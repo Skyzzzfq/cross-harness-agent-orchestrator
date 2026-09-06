@@ -196,9 +196,13 @@ def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
             "cli_available": codebuddy_version is not None,
             "version": codebuddy_version,
             "cli_path": codebuddy_path,
-            "login_command": "codebuddy login（或在 WorkBuddy 客户端内登录中国站账号）",
-            "login_status_hint": "当前认证状态由 CodeBuddy 客户端/CLI 管理；登录后即可被编排器调用。",
-            "note": "需要中国站 internal 环境登录态。CLI 已随项目安装在 .agent-hub/tools；登录请在 WorkBuddy 客户端或终端完成。",
+            "login_command": "在 PowerShell 运行 codebuddy 进入交互界面，输入 /login（自动弹浏览器授权）",
+            "login_status_hint": (
+                "CLI 独立认证，与 WorkBuddy 桌面客户端不共享；"
+                "PowerShell 中设 $env:CODEBUDDY_INTERNET_ENVIRONMENT=\"internal\" 后启动 CLI，"
+                "输入 /login 走浏览器 OAuth。"
+            ),
+            "note": "需要中国站 internal 环境登录态。CLI 已随项目安装在 .agent-hub/tools；登录在交互会话内用 /login 完成。",
         },
         {
             "backend": "fake",
