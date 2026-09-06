@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import socket
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -442,6 +443,22 @@ class ConsoleHTTPServer(HTTPServer):
         self.server_close()
 
 
+def find_free_port(host: str, start: int, tries: int = 20) -> int | None:
+    """返回 >= start 的第一个可绑定端口；范围内全部被占用时返回 None。
+
+    本地单用户工具的现实动机：Steam 等软件常占用 8080，把 requested
+    端口让给此类进程、自己顺延，可避免"起不来"或开错页面。
+    """
+    for candidate in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, candidate))
+                return candidate
+            except OSError:
+                continue
+    return None
+
+
 def run_console(
     *,
     db: Path,
@@ -453,17 +470,24 @@ def run_console(
 ) -> None:
     db_path = db if db.is_absolute() else project_root / db
     store = SQLiteStateStore(db_path)
+    actual_port = find_free_port(host, port)
+    if actual_port is None:
+        print(f"console error: no free port in {port}..{port + 19} on {host}")
+        store.close()
+        return
+    if actual_port != port:
+        print(f"console: port {port} busy (e.g. Steam) -> using {actual_port}")
     server = ConsoleHTTPServer(
         store,
         project_root=project_root,
         db_path=db_path,
         host=host,
-        port=port,
+        port=actual_port,
         initial_run_id=initial_run_id,
         worktree=worktree,
     )
     print(
-        f"console listening on http://{host}:{port}  "
+        f"console listening on http://{host}:{actual_port}  "
         f"(project: {project_root}, db: {db_path})"
     )
     try:

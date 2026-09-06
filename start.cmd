@@ -92,21 +92,30 @@ if /i not "%MODE%"=="console" (
     goto :help
 )
 
-echo [orchestrator] checking port %PORT% ...
-powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient; try{$c.Connect('127.0.0.1',%PORT%);exit 0}catch{exit 1}" >nul 2>&1
-if not errorlevel 1 (
-    echo [orchestrator] console already running on %PORT% - opening browser only.
-    goto :open_browser
+echo [orchestrator] picking a free port (starting at %PORT%) ...
+:pick_port
+powershell -NoProfile -Command "$l=New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback,%PORT%); try{$l.Start();$l.Stop();exit 0}catch{exit 1}" >nul 2>&1
+if errorlevel 1 (
+    set /a PORT+=1
+    if %PORT% gtr 8099 (
+        echo [error] no free port found between 8080 and 8099. Close something and retry.
+        goto :fail
+    )
+    goto :pick_port
 )
+set "URL=http://127.0.0.1:%PORT%"
 
 echo [orchestrator] starting web console on %URL% ...
-start "orchestrator-console (close to stop)" cmd /k ""%VPY%" -m orchestrator console --port %PORT%"
+start "orchestrator-console (port %PORT%, close to stop)" cmd /k ""%VPY%" -m orchestrator console --port %PORT%"
 timeout /t 3 /nobreak >nul
 
 :open_browser
 start "" %URL%
 echo [orchestrator] browser opened: %URL%
 echo [orchestrator] if nothing opened, visit %URL% manually.
+echo [orchestrator] note: if a page shows Steam/Inspectable Web Contents, that
+echo                 means 8080 is taken by Steam - the console window above
+echo                 prints the real address (console auto-shifts ports).
 goto :done
 
 rem ------- check ---------------------------------------------------

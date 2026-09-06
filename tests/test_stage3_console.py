@@ -277,5 +277,49 @@ class ConsoleBusyTests(unittest.TestCase):
         self.assertEqual(status, 409, payload)
 
 
+class FindFreePortTests(unittest.TestCase):
+    """端口自动顺延：请求端口被占（如 Steam 占 8080）时选下一个空闲端口。"""
+
+    def test_skips_busy_port(self) -> None:
+        import socket
+
+        from orchestrator.console.server import find_free_port
+
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        try:
+            busy = blocker.getsockname()[1]
+            pick = find_free_port("127.0.0.1", busy, tries=50)
+            self.assertIsNotNone(pick)
+            self.assertNotEqual(pick, busy)
+            # 选出的端口确实可绑定
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.bind(("127.0.0.1", pick))
+            probe.close()
+        finally:
+            blocker.close()
+
+    def test_all_busy_returns_none(self) -> None:
+        import socket
+
+        from orchestrator.console.server import find_free_port
+
+        blockers: list[socket.socket] = []
+        start = 0
+        try:
+            for _ in range(5):
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.bind(("127.0.0.1", 0))
+                s.listen(1)
+                blockers.append(s)
+            # 找一个被占端口作为起点，tries=1 保证范围只有它自己
+            busy = blockers[0].getsockname()[1]
+            self.assertIsNone(find_free_port("127.0.0.1", busy, tries=1))
+        finally:
+            for s in blockers:
+                s.close()
+
+
 if __name__ == "__main__":
     unittest.main()
