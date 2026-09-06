@@ -46,6 +46,8 @@
 
 **一键启动：双击仓库根目录的 `start.cmd`**（或命令行 `.\start.cmd`）。脚本会自动：
 
+> 不会用控制台？先读 5 分钟傻瓜教程：[docs/CONSOLE_GUIDE.md](docs/CONSOLE_GUIDE.md)。
+
 1. 首次运行自动建 `.venv` + 装依赖（`scripts/bootstrap.py`）；
 2. 设置 CodeBuddy 中国站所需环境变量；
 3. 从 8080 起自动挑一个空闲端口拉起网页控制台，并打开对应地址（如 `http://127.0.0.1:8080`；被占则顺延 8081/8082…）。
