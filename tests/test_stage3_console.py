@@ -7,6 +7,7 @@ import time
 import unittest
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from orchestrator.console.server import ConsoleHTTPServer
 from orchestrator.core.models import TaskState
@@ -234,6 +235,44 @@ class ConsoleServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_connections_carry_login_fields(self) -> None:
+        status, payload = _request(self.port, "/api/connections")
+        self.assertEqual(status, 200)
+        for item in payload["connections"]:
+            self.assertIn("login_capable", item)
+            self.assertIn("logged_in", item)
+        by_name = {item["backend"]: item for item in payload["connections"]}
+        self.assertFalse(by_name["fake"]["login_capable"])
+        self.assertIsInstance(by_name["codex"]["login_capable"], bool)
+        self.assertIn(
+            by_name["codebuddy"]["logged_in"], (True, False, None)
+        )
+
+    def test_connection_login_rejects_fake(self) -> None:
+        status, payload = _request(
+            self.port,
+            "/api/connections/login",
+            method="POST",
+            body={"backend": "fake"},
+        )
+        self.assertEqual(status, 400)
+
+    def test_connection_login_calls_launcher(self) -> None:
+        with mock.patch(
+            "orchestrator.console.settings.launch_login",
+            return_value={"ok": True, "message": "opened", "script": "x.cmd"},
+        ) as launcher:
+            status, payload = _request(
+                self.port,
+                "/api/connections/login",
+                method="POST",
+                body={"backend": "codebuddy"},
+            )
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        launcher.assert_called_once()
+        self.assertEqual(launcher.call_args.args[1], "codebuddy")
+
 
 class ConsoleBusyTests(unittest.TestCase):
     """serve 持权时，协调写（cancel/pause）返回 409，控制台不绕过。"""
@@ -319,6 +358,62 @@ class FindFreePortTests(unittest.TestCase):
         finally:
             for s in blockers:
                 s.close()
+
+
+class LoginHelperTests(unittest.TestCase):
+    """登录引导脚本生成（dry_run，不弹窗）与未知后端拒绝。"""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "proj"
+        self.project.mkdir(parents=True)
+        self.codex_cli = self.project / "codex.cmd"
+        self.codex_cli.write_text("@echo off\r\n", encoding="ascii")
+        self.cb_cli = self.project / "codebuddy.cmd"
+        self.cb_cli.write_text("@echo off\r\n", encoding="ascii")
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _launch(self, backend: str):
+        import os
+
+        from orchestrator.console import settings as s
+
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_HUB_CODEBUDDY_BIN": "", "CODEBUDDY_CODE_PATH": ""},
+            clear=False,
+        ), mock.patch.object(
+            s.shutil, "which", return_value=str(self.codex_cli)
+        ), mock.patch.object(
+            s, "_local_cli_path", return_value=self.cb_cli
+        ):
+            return s.launch_login(self.project, backend, dry_run=True)
+
+    def test_codebuddy_script_has_env_and_cli(self) -> None:
+        result = self._launch("codebuddy")
+        self.assertTrue(result["ok"], result)
+        script = Path(result["script"])
+        self.assertTrue(script.is_file())
+        text = script.read_text(encoding="ascii")
+        self.assertIn("CODEBUDDY_SKIP_GIT_BASH_CHECK=1", text)
+        self.assertIn("CODEBUDDY_INTERNET_ENVIRONMENT=internal", text)
+        self.assertIn("codebuddy.cmd", text)
+        self.assertIn("/login", text)
+
+    def test_codex_script_runs_login(self) -> None:
+        result = self._launch("codex")
+        self.assertTrue(result["ok"], result)
+        text = Path(result["script"]).read_text(encoding="ascii")
+        self.assertIn("codex.cmd", text)
+        self.assertIn("login", text)
+
+    def test_unknown_backend_ok_false(self) -> None:
+        from orchestrator.console import settings as s
+
+        result = s.launch_login(self.project, "fake", dry_run=True)
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":

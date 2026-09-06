@@ -108,6 +108,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/teams":
             self._save_team(body)
             return
+        if path == "/api/connections/login":
+            self._login_connection(body)
+            return
         if path.startswith("/api/runs/"):
             self._post_run_action(path, body)
             return
@@ -137,6 +140,24 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, f"{type(exc).__name__}: {exc}")
             return
         self._send_json({"ok": True, "path": str(target)})
+
+    def _login_connection(self, body: dict[str, Any]) -> None:
+        """打开后端登录引导窗口（codex/codebuddy）。"""
+        from orchestrator.console.settings import launch_login
+
+        backend = str(body.get("backend") or "")
+        if backend not in {"codex", "codebuddy"}:
+            self._send_error_json(400, "backend must be codex or codebuddy")
+            return
+        try:
+            result = launch_login(self.server.project_root, backend)
+        except Exception as exc:  # noqa: BLE001
+            self._send_error_json(500, f"{type(exc).__name__}: {exc}")
+            return
+        if not result.get("ok"):
+            self._send_json({"ok": False, **result})
+            return
+        self._send_json({"ok": True, **result})
 
     # -- 只读 API -----------------------------------------------------------
 

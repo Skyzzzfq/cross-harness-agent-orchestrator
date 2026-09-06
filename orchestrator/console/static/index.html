@@ -220,7 +220,7 @@ button{font-family:inherit;cursor:pointer}
 
 <!-- ============ Connections ============ -->
 <main id="view-connections">
-  <div class="view-head"><h2>厂商连接</h2><span class="sub">探测登录态并引导登录 · 本页不存储任何 token / 凭证</span></div>
+  <div class="view-head"><h2>厂商连接</h2><span class="sub">探测登录态并引导登录 · 本页不存储任何 token / 凭证</span><button class="ghost btn sm" id="reprobeBtn" style="margin-left:auto;align-self:center">重新探测</button></div>
   <div class="conn" id="connList"></div>
 </main>
 
@@ -286,9 +286,12 @@ async function loadRuns(){
         </span>
       </div>
       <div class="run-detail" style="display:none" data-detail="${esc(run.run_id)}"></div>`;
-    div.querySelector("[data-open]").onclick=()=>openRun(run.run_id,div);
-    div.querySelector("[data-start]").onclick=()=>startServe(run.run_id);
-    div.querySelector("[data-stop]").onclick=()=>stopServe(run.run_id);
+    const btnOpen=div.querySelector("[data-open]");
+    if(btnOpen)btnOpen.onclick=()=>openRun(run.run_id,div);
+    const btnStart=div.querySelector("[data-start]");
+    if(btnStart)btnStart.onclick=()=>startServe(run.run_id);
+    const btnStop=div.querySelector("[data-stop]");
+    if(btnStop)btnStop.onclick=()=>stopServe(run.run_id);
     if(currentRun===run.run_id)openRun(run.run_id,div,false);
     box.appendChild(div);
   }
@@ -462,19 +465,38 @@ async function loadConnections(){
         <span class="backend">${esc(x.backend)}</span>
         ${x.cli_available?'<span class="pill ok">CLI 可用</span>':'<span class="pill err">未找到 CLI</span>'}
         ${x.logged_in===true?'<span class="pill violet">已登录</span>':(x.logged_in===false?'<span class="pill warn">未登录</span>':'')}
+        ${x.backend==="fake"?'<span class="pill gray">无需账号</span>':''}
       </div>
       <div class="muted" style="margin-bottom:10px">${esc(x.label)}</div>
       <div style="margin-bottom:6px" class="form-row"><span class="muted">版本</span><span class="mono">${esc(x.version||"—")}</span></div>
       ${x.cli_path?`<div class="muted" style="margin-bottom:6px;word-break:break-all">路径：<span class="mono">${esc(x.cli_path)}</span></div>`:""}
-      ${x.login_command?`<div class="muted" style="margin:8px 0 4px">登录方式（在 WorkBuddy 客户端或终端完成，本页不接触凭证）</div>
-        <div class="cmd">${esc(x.login_command)}</div>
-        ${x.login_status_hint?`<div class="muted" style="margin-top:6px">${esc(x.login_status_hint)}</div>`:""}
-        <div class="muted" style="margin-top:8px">${esc(x.note||"")}</div>`
-        :`<div class="muted">${esc(x.note||"")}</div>`}
+      ${x.login_capable && x.logged_in!==true ? `
+        <div style="margin:10px 0 4px">
+          <button class="btn sm" data-login="${esc(x.backend)}">一键登录授权</button>
+          <span class="muted" style="margin-left:8px">点击后会在桌面打开登录窗口</span>
+        </div>`:''}
+      ${x.login_status_hint?`<div class="muted" style="margin-top:6px">${esc(x.login_status_hint)}</div>`:""}
+      ${x.note?`<div class="muted" style="margin-top:8px">${esc(x.note)}</div>`:""}
     </div>`;
     box.appendChild(div);
   }
 }
+$("#reprobeBtn").onclick=()=>{toast("重新探测中…");loadConnections();};
+$("#connList").addEventListener("click",async e=>{
+  const btn=e.target.closest("[data-login]");
+  if(!btn)return;
+  const backend=btn.dataset.login;
+  btn.disabled=true;btn.textContent="正在打开登录窗口…";
+  const r=await api("/api/connections/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({backend})});
+  if(r.status===200&&r.body.ok){
+    toast(backend==="codebuddy"
+      ?"登录窗口已打开：等 CodeBuddy 启动后，在窗口里输入 /login 回车，浏览器会自动弹出授权页。完成后回本页点「重新探测」。"
+      :"登录窗口已打开：浏览器会弹出授权页（或按窗口内提示操作）。完成后回本页点「重新探测」。","ok");
+  } else {
+    toast((r.body&&(r.body.message||r.body.error))||"打开登录窗口失败","err");
+  }
+  setTimeout(loadConnections,4000);
+});
 
 /* ============ 启动 ============ */
 (async function(){

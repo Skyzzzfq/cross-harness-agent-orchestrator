@@ -97,6 +97,157 @@ def list_saved_teams(project_root: Path) -> list[dict[str, Any]]:
     return teams
 
 
+def _codebuddy_auth_dir() -> Path | None:
+    """CodeBuddy CLI 认证目录（仅判断路径，绝不读取凭证内容）。"""
+    import os
+
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return None
+    return (
+        Path(local)
+        / "CodeBuddyExtension"
+        / "Data"
+        / "Public"
+        / "auth"
+    )
+
+
+def codebuddy_login_state() -> bool | None:
+    """探测 CodeBuddy CLI 登录态（启发式：只检查标记文件存在性）。
+
+    返回 True=已登录 / False=未登录 / None=无法判定（目录不存在或读取被拒）。
+    不读取、不打印任何凭证内容。
+    """
+    auth_dir = _codebuddy_auth_dir()
+    if auth_dir is None or not auth_dir.is_dir():
+        return None
+    try:
+        entries = list(auth_dir.iterdir())
+    except OSError:
+        return None
+    logged_out = any(
+        p.name.endswith(".logged-out") or ".logged-out" in p.name for p in entries
+    )
+    info_files = [
+        p
+        for p in entries
+        if p.name.endswith(".info")
+        and ".logged-out" not in p.name
+        and p.stat().st_size > 0
+    ]
+    if logged_out:
+        return False
+    if info_files:
+        return True
+    return None
+
+
+def _login_window_script(project_root: Path, backend: str) -> Path:
+    """生成后端登录引导脚本（.agent-hub/login/<backend>-login.cmd）。
+
+    脚本本身只做三件事：设好环境变量、启动 CLI 登录流程、暂停等待用户查看。
+    CLI 绝对路径在写文件时加引号，规避 cmd 嵌套引号转义坑。
+    """
+    script_dir = hub_dir(project_root) / "login"
+    script_dir.mkdir(parents=True, exist_ok=True)
+    path = script_dir / f"{backend}-login.cmd"
+
+    if backend == "codex":
+        cli = shutil.which("codex") or _local_cli_path(project_root, "codex")
+        if cli is None:
+            raise FileNotFoundError("codex CLI not found")
+        body = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            "echo ================================================\r\n"
+            "echo   Codex login helper\r\n"
+            "echo   A browser window will open - authorize there,\r\n"
+            "echo   then close this window and refresh the console.\r\n"
+            "echo ================================================\r\n"
+            f'"{cli}" login\r\n'
+            "echo.\r\n"
+            "pause\r\n"
+        )
+    elif backend == "codebuddy":
+        import os
+
+        cli = (
+            os.environ.get("AGENT_HUB_CODEBUDDY_BIN")
+            or os.environ.get("CODEBUDDY_CODE_PATH")
+            or None
+        )
+        if not cli or not Path(cli).is_file():
+            local = _local_cli_path(project_root, "codebuddy", "codebuddy-code")
+            cli = str(local) if local else shutil.which("codebuddy")
+        if not cli:
+            raise FileNotFoundError("codebuddy CLI not found")
+        body = (
+            "@echo off\r\n"
+            "setlocal\r\n"
+            "set CODEBUDDY_SKIP_GIT_BASH_CHECK=1\r\n"
+            "set CODEBUDDY_INTERNET_ENVIRONMENT=internal\r\n"
+            "echo ============================================================\r\n"
+            "echo   CodeBuddy login helper\r\n"
+            "echo   When the CodeBuddy session starts below, type:  /login\r\n"
+            "echo   then press Enter - a browser will open for authorization.\r\n"
+            "echo   After it says signed in, close this window and refresh.\r\n"
+            "echo ============================================================\r\n"
+            f'"{cli}"\r\n'
+            "echo.\r\n"
+            "pause\r\n"
+        )
+    else:
+        raise ValueError(f"backend has no login flow: {backend}")
+
+    path.write_text(body, encoding="ascii")
+    return path
+
+
+def launch_login(
+    project_root: Path,
+    backend: str,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """在桌面打开后端登录引导窗口（dry_run=True 只生成脚本不弹窗，供测试）。
+
+    返回 dict：ok / message / script（生成的引导脚本路径）。
+    """
+    try:
+        script = _login_window_script(project_root, backend)
+    except (FileNotFoundError, ValueError) as exc:
+        return {"ok": False, "message": str(exc), "script": None}
+    if dry_run:
+        return {"ok": True, "message": "script ready", "script": str(script)}
+    try:
+        import subprocess
+        import sys
+
+        if sys.platform == "win32":
+            # start 一个新控制台窗口运行引导脚本（窗口标题避免中文避免 GBK 乱码）
+            subprocess.Popen(
+                ["cmd", "/c", "start", "AgentHub-login", str(script)],
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
+        else:
+            subprocess.Popen(
+                ["cmd", "/k", str(script)],
+                start_new_session=True,
+            )
+    except OSError as exc:  # 打不开窗口（如沙箱/无桌面会话）
+        return {
+            "ok": False,
+            "message": f"cannot open a terminal window here: {exc}",
+            "script": str(script),
+        }
+    return {
+        "ok": True,
+        "message": "login helper window opened",
+        "script": str(script),
+    }
+
+
 def _local_cli_path(project_root: Path, *names: str) -> Path | None:
     """项目内受管 CLI：.agent-hub/tools/node_modules/.bin/<name>。
 
@@ -174,6 +325,7 @@ def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
     codebuddy_version = (
         _run_version(codebuddy_path, "--version") if codebuddy_path else None
     )
+    codebuddy_logged_in = codebuddy_login_state() if codebuddy_path else None
 
     return [
         {
@@ -183,6 +335,7 @@ def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
             "version": codex_version,
             "cli_path": codex_path,
             "logged_in": codex_logged_in,
+            "login_capable": codex_path is not None,
             "login_command": "codex login",
             "login_status_hint": (
                 f"检测到已登录：{codex_login}" if codex_logged_in
@@ -196,13 +349,19 @@ def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
             "cli_available": codebuddy_version is not None,
             "version": codebuddy_version,
             "cli_path": codebuddy_path,
-            "login_command": "在 PowerShell 运行 codebuddy 进入交互界面，输入 /login（自动弹浏览器授权）",
+            "logged_in": codebuddy_logged_in,
+            "login_capable": codebuddy_path is not None,
+            "login_command": "点击下方「一键登录授权」按钮打开登录窗口，输入 /login 完成浏览器授权",
             "login_status_hint": (
-                "CLI 独立认证，与 WorkBuddy 桌面客户端不共享；"
-                "PowerShell 中设 $env:CODEBUDDY_INTERNET_ENVIRONMENT=\"internal\" 后启动 CLI，"
-                "输入 /login 走浏览器 OAuth。"
+                "CLI 独立认证，与 WorkBuddy 桌面客户端不共享。"
+                if codebuddy_logged_in is None
+                else (
+                    "检测到 CLI 登录态文件。"
+                    if codebuddy_logged_in
+                    else "未检测到登录态，请点击一键登录授权。"
+                )
             ),
-            "note": "需要中国站 internal 环境登录态。CLI 已随项目安装在 .agent-hub/tools；登录在交互会话内用 /login 完成。",
+            "note": "需要中国站 internal 环境登录态。CLI 已随项目安装在 .agent-hub/tools；登录在独立窗口内用 /login 完成。",
         },
         {
             "backend": "fake",
@@ -210,6 +369,8 @@ def probe_connections(project_root: Path | None = None) -> list[dict[str, Any]]:
             "cli_available": True,
             "version": "built-in",
             "cli_path": None,
+            "logged_in": True,
+            "login_capable": False,
             "login_command": None,
             "login_status_hint": None,
             "note": "无需账号，用于离线跑通流程与界面演示。",
