@@ -339,7 +339,9 @@ class CodeBuddyBackendAdapter:
         options = CodeBuddyAgentOptions(
             cwd=request.policy.cwd,
             codebuddy_code_path=cli_path,
-            max_turns=1,
+            # 写任务需要多轮工具调用（Edit/Write 文件 + 自检），给足轮次；
+            # 只读 marker 任务单轮即可。
+            max_turns=20 if request.policy.access_mode == "write" else 1,
             permission_mode=perm,
             allowed_tools=[],
             disallowed_tools=[],

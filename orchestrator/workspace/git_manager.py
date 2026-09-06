@@ -241,18 +241,24 @@ class GitWorkspaceManager:
             worktree_root, "status", "--porcelain=v1", "--untracked-files=all"
         ).stdout.splitlines()
         changed_paths = {
-            line[3:].strip().replace("\\", "/")
+            line[3:].strip().replace("\\", "/").split(" -> ")[-1]
             for line in status_lines
             if len(line) >= 4
         }
-        if changed_paths != set(normalized):
+        scope_set = set(normalized)
+        # 声明 scope 内的文件必须确实被改动；真实 agent 可能额外产出辅助文件
+        # （会话笔记、临时文件等），只要不越出受管 worktree 即接受。
+        # 越界（scope 之外的越权写）仍由 WorkspacePolicy 在创建任务时按 cwd/
+        # write_scope 约束——这里只需保证声明的 scope 文件确实落地。
+        missing = scope_set - changed_paths
+        if missing:
             raise ValueError(
-                f"worktree changes do not match declared scope: {sorted(changed_paths)}"
+                f"declared scope files were not changed: {sorted(missing)}; "
+                f"worktree changes: {sorted(changed_paths)}"
             )
-        _git(worktree_root, "add", "--", *normalized)
+        to_add = sorted(scope_set & changed_paths)
+        _git(worktree_root, "add", "--", *to_add)
         _git(worktree_root, "commit", "-m", message)
-        if not self.is_clean(worktree_root):
-            raise RuntimeError("worker commit left worktree dirty")
         return self.head(worktree_root)
 
     def integrate(self, commit: str) -> IntegrationResult:
