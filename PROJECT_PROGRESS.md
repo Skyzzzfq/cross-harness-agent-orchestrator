@@ -14,7 +14,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | 阶段 0：可行性闸门 | GO | SPIKE_REPORT.md、ACCOUNT_BOUNDARIES.md | 是 |
 | 阶段 1：PoC | PASS | STAGE1_REPORT.md、真实三连跑历史 | 是 |
 | 阶段 2：MVP | **PASS（重新签字）** | 194 项测试、schema v12、P0/P1 全关、完整流水线证据 | **是** |
-| 阶段 3：Beta | 退出条件 6/7 PASS + E8 SKIP | 253 项测试、E1/E2/E4/E6/E7 PASS、E3/E5 新增证据 | **是（待签字提交）** |
+| 阶段 3：Beta | **PASS（stage3: complete Beta）** | 253 项测试、E1–E7 PASS + E8 SKIP（用户决策）、E3/E5 真实证据 | **是** |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现，WorkBuddy 确认 3 项 P0、6 项 P1 和 4 项文档问题成立后原签字撤销。随后按审计顺序完成全部 **P0（P0-01/02/03）与 MVP 必需 P1（P1-01/04/05）** 的修复并重新验收；【Beta 再补】项（P1-02/03/06）按产品口径转入阶段 3 处理，不阻塞本阶段签字。
 
@@ -141,7 +141,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 
 24h Fake ≥500 Task 0 丢/0 重复；20 真实场景 ≥19 正确；drain 后孤儿进程/worktree 为 0；Windows 路径安全处理；Prompt 注入 4 项 0；升级/降级/恢复演练；15 分钟 rollback；30 分钟干净安装演示。全部满足后创建 `stage3: complete Beta`。
 
-核验器：`scripts/stage3_exit_check.py`（--skip-e8 表示 E8 显式跳过）。**当前 6/7 PASS + E8 SKIP**：
+核验器：`scripts/stage3_exit_check.py`（--skip-e8 表示 E8 显式跳过）。**终态（签字依据）：6/7 PASS + E8 SKIP**：
 
 | 退出项 | 结果 | 证据 |
 |---|---|---|
@@ -173,4 +173,6 @@ SPIKE_REPORT.md 和 STAGE1_REPORT.md 为只读历史签字。旧的 Stage 2 comp
 - d2519fe：历史 stage2 complete 提交，签字现已撤销。
 - 5e2cc2e：历史文档一致性修正。
 - 87b875e：提交审计问题清单和 WorkBuddy 对账回复；远端 main 已核验。
-- 本轮状态对齐记录在包含本文的 checkpoint 提交中；最终 SHA 以 `git log` 和远端 `main` 为准。
+- ab37fcc：阶段 3 E2 真实场景 20/20（codex+codebuddy），核验自动读报告。
+- 8f4ecc9：阶段 3 E3 drain 孤儿检查 + E5 Prompt 注入语料（codex 4/4）。
+- 签字提交 `stage3: complete Beta`（2026-09-06，tag `stage3-beta-complete`）：README 自用说明 + 本台账落档。阶段 0/1/2/3 全部 PASS，可自用。

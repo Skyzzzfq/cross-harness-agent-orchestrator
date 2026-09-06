@@ -2,9 +2,9 @@
 
 这是一个本地多 Agent 编排器，目标是让 Codex 与 CodeBuddy/WorkBuddy 在同一项目中承担可配置的主管、执行和审核职位。
 
-当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3 待开始。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径），全量 194 项测试通过。剩余【Beta 再补】项（金额预算、审批原子消费、Outbox 重试）转入阶段 3。
+当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3（Beta）已完成并签字（`stage3: complete Beta`，见 tag `stage3-beta-complete`）。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径）；Beta 再补项 B1–B3（金额预算、审批原子消费、Outbox 重试）已在本阶段内完成。阶段 3 退出条件 E1–E7 PASS，E8（30 分钟干净 Windows 安装演示）经决策跳过（开发自用），全量 253 项测试通过。阶段 3 已具备真实账号证据：E2 真实 20 场景 20/20、E3 真实 drain 孤儿进程/worktree/锁为 0、E5 codex 真实注入语料 4/4 违规 0。
 
-当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。阶段 3 开始前先读 [WORKBUDDY_HANDOFF.md](WORKBUDDY_HANDOFF.md)。
+当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。开发纪律见 [AGENTS.md](AGENTS.md)，安装与 30 分钟演示见 [docs/INSTALL.md](docs/INSTALL.md)，审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。
 
 ## 当前交付范围
 
@@ -32,6 +32,8 @@
 .\.venv\Scripts\python.exe -m orchestrator status
 .\.venv\Scripts\python.exe -m orchestrator status --run <run-id>
 .\.venv\Scripts\python.exe -m orchestrator reconcile --run <run-id>
+.\.venv\Scripts\python.exe -m orchestrator console --run <run-id>   # 网页控制台（http://127.0.0.1:8080）
+.\.venv\Scripts\python.exe -m orchestrator serve-team --run <run-id> --team <team名>   # 按 team 常驻调度
 .\.venv\Scripts\python.exe -m orchestrator demo --fake
 .\.venv\Scripts\python.exe -m orchestrator demo --git-fake
 .\.venv\Scripts\python.exe -m orchestrator demo --recovery-fake
@@ -39,6 +41,30 @@
 .\.venv\Scripts\python.exe -m orchestrator probe
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+## 自己上手（开发自用）
+
+环境就绪（见下方 `auth`）后，每天只需两步：
+
+```powershell
+# 1) 起网页控制台 → 浏览器打开 http://127.0.0.1:8080
+#    Connections：探测 codex/codebuddy 登录态并给登录引导（不存储凭证）
+#    Teams：鼠标组建临时 team（backend/role/count 多池，可覆盖默认 config/team.yaml）
+#    Runs：列出/新建 Run，按 team 一键启动/停止后台 serve（日志 .agent-hub/logs/）
+.\.venv\Scripts\python.exe -m orchestrator console --port 8080
+
+# 2) 或命令行直接常驻调度（run-id / team 名可从控制台 Runs/Teams 页获得）
+.\.venv\Scripts\python.exe -m orchestrator serve-team --run <run-id> --team <team名>
+```
+
+> 注意：跑 codebuddy 任务时需先设两个环境变量（中国站），否则该后端任务会失败：
+>
+> ```powershell
+> $env:CODEBUDDY_SKIP_GIT_BASH_CHECK = "1"
+> $env:CODEBUDDY_INTERNET_ENVIRONMENT = "internal"
+> ```
+>
+> 浏览器登录态不会自动共享给独立 SDK；首次使用先执行 `orchestrator auth codex` 与 `orchestrator auth codebuddy`（见下）。
 
 `init` 会校验 [团队配置](config/team.yaml)，并把运行状态初始化到 `.agent-hub/state/agent-hub.db`。配置文件采用 JSON-compatible YAML 1.2，以便编排核心继续只依赖 Python 标准库。
 
