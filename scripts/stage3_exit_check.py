@@ -47,7 +47,16 @@ def check_e1() -> tuple[str, str]:
 
 
 def check_e2() -> tuple[str, str]:
-    return "PENDING", "需 Codex/CodeBuddy 账号跑 20 个预冻结真实场景 ≥19 正确"
+    report = _read_json(".agent-hub/reports/stage3-real.json")
+    if report is None:
+        return "PENDING", "缺少真实场景报告；跑 scripts/stage3_real_run.py --backends codex,codebuddy"
+    total = int(report.get("scenarios_total") or 0)
+    passed = int(report.get("passed") or 0)
+    if report.get("status") == "pass" and total >= 20 and passed >= 19:
+        return "PASS", f"真实 20 场景 {passed}/{total} 正确（Codex + CodeBuddy）"
+    if total:
+        return "FAIL", f"真实场景 {passed}/{total}，未达 ≥19/20"
+    return "PENDING", "真实场景报告为空"
 
 
 def check_e3() -> tuple[str, str]:
