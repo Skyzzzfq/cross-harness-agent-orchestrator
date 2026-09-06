@@ -283,38 +283,11 @@ class CodeBuddyBackendAdapter:
     backend = "codebuddy"
 
     def __init__(self) -> None:
-        # 认证检测每个进程只做一次：SDK 的 authenticate() 每次起 subprocess 探测
-        # 登录态，并发调用会竞态（已登录也可能误判 auth_url 需登录，并弹浏览器）。
-        import asyncio as _asyncio
-
-        self._auth_lock = _asyncio.Lock()
-        self._auth_ok: bool | None = None
-
-    async def _ensure_authenticated(self, cli_path: str) -> bool:
-        """串行化且只做一次的登录态检测；已认证则缓存，绝不重复弹浏览器。"""
-        if self._auth_ok is not None:
-            return self._auth_ok
-        async with self._auth_lock:
-            if self._auth_ok is not None:
-                return self._auth_ok
-            from codebuddy_agent_sdk import authenticate
-
-            auth = await authenticate(
-                environment=CODEBUDDY_REGION,
-                env=codebuddy_china_environment(),
-                codebuddy_code_path=cli_path,
-                timeout=30.0,
-            )
-            if auth.auth_url:
-                try:
-                    await auth.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._auth_ok = False
-                return False
-            await auth
-            self._auth_ok = True
-            return True
+        # 不做 authenticate() 预检：它走独立 OAuth 探测，对已登录用户也会返回
+        # 登录 URL（误判需登录并弹浏览器）。登录态由 CLI 子进程在 query 时按
+        # setting_sources=["user","project"] 直接读用户配置，未登录则以
+        # ExecutionError 返回并记为 blocked。
+        return
 
     def capabilities(self) -> BackendCapabilities:
         version = None
@@ -357,16 +330,6 @@ class CodeBuddyBackendAdapter:
                     retryable=False,
                 ),
             )
-        authenticated = await self._ensure_authenticated(cli_path)
-        if not authenticated:
-            return _BlockedRunningCall(
-                request,
-                Failure(
-                    kind="interactive_login_required",
-                    message="CodeBuddy requires interactive sign-in (run CLI /login)",
-                    retryable=False,
-                ),
-            )
         env = codebuddy_china_environment()
         # 跳过 Git Bash 检测（编排场景不需要），消除 wmic 告警
         env["CODEBUDDY_SKIP_GIT_BASH_CHECK"] = "1"
@@ -381,9 +344,11 @@ class CodeBuddyBackendAdapter:
             allowed_tools=[],
             disallowed_tools=[],
             mcp_servers={},
-            extra_args=[],
+            extra_args={},
             request_timeout_ms=int(request.policy.timeout_seconds * 1000),
-            setting_sources=[],
+            # 关键：SDK 默认 setting_sources=none（环境隔离），会让 CLI 读不到
+            # 用户登录态而误报"需要 /login"。加载 user/project 设置以复用已登录凭证。
+            setting_sources=["user", "project"],
             env=env,
         )
         return _CodeBuddyRunningCall(request, query, options)
@@ -464,14 +429,26 @@ class _CodeBuddyRunningCall(_BaseRunningCall):
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            await self._finish(
-                CallState.FAILED,
-                failure=Failure(
-                    kind="sdk_error",
-                    message=redact_sensitive(str(exc))[:500],
-                    retryable=True,
-                ),
-            )
+            message = redact_sensitive(str(exc))[:500]
+            # 未登录由 CLI 在 query 时返回（ExecutionError: Authentication required）
+            if "sign in" in message or "login" in message.lower() or "auth" in message.lower():
+                await self._finish(
+                    CallState.FAILED,
+                    failure=Failure(
+                        kind="interactive_login_required",
+                        message="CodeBuddy requires interactive sign-in (run CLI /login)",
+                        retryable=False,
+                    ),
+                )
+            else:
+                await self._finish(
+                    CallState.FAILED,
+                    failure=Failure(
+                        kind="sdk_error",
+                        message=message,
+                        retryable=True,
+                    ),
+                )
 
     async def cancel(self, reason: str) -> CallSnapshot:
         if not reason.strip():
