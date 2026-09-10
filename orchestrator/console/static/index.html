@@ -325,25 +325,38 @@ async function loadSummary(runId){
   const s=r.body||{};return s;}
 async function loadDetail(runId){
   const box=$(".run-detail[data-detail='"+runId+"']");if(!box)return;
-  const [tasks,appr,mg,events]=await Promise.all([
+  const [tasks,appr,mg,events,wt]=await Promise.all([
     api(`/api/runs/${runId}/tasks`),api(`/api/runs/${runId}/approvals`),
-    api(`/api/runs/${runId}/merges`),api(`/api/runs/${runId}/events`)]);
+    api(`/api/runs/${runId}/merges`),api(`/api/runs/${runId}/events`),
+    api(`/api/runs/${runId}/worktree`)]);
+  const wtInfo=(wt.body&&wt.body.worktree)||{};
   box.innerHTML=`
     <div class="form-row" style="margin-bottom:14px">
       <button class="ghost btn sm" data-action="new">＋ 发起任务</button>
+      <button class="ghost btn sm" data-action="worktree">准备受管 worktree</button>
       <button class="ghost btn sm" data-action="pause">暂停调度</button>
       <button class="ghost btn sm" data-action="resume">恢复调度</button>
       <button class="ghost btn sm" data-action="refresh">刷新</button>
     </div>
     <div class="detail-section">
+      <h4>受管 worktree</h4>
+      <div class="ev-row"><span class="k">路径</span><span class="mono">${esc(wtInfo.worktree||"—")}</span></div>
+      <div class="ev-row"><span class="k">base commit</span><span class="mono">${esc((wtInfo.base_commit||"").slice(0,12)||"—")}</span></div>
+      <div class="ev-row"><span class="k">状态</span>${wtInfo.worktree&&(wtInfo.exists||wtInfo.created)?'<span class="pill ok">已就绪</span>':'<span class="pill warn">未准备（写任务前需准备）</span>'}</div>
+    </div>
+    <div class="detail-section">
       <h4>任务</h4><div style="overflow-x:auto"><table>
-      <thead><tr><th>任务</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th></th></tr></thead>
+      <thead><tr><th>任务</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th>审核</th><th></th></tr></thead>
       <tbody>${
         (tasks.body.tasks||[]).map(t=>`<tr><td class="mono">${esc(t.task_id)}</td>
           <td>${pill(t.state)}</td><td>${esc(t.access_mode)}</td>
           <td class="muted">${esc((t.write_scope_json||"").slice(0,40))}</td>
           <td>${t.attempt_count??""}</td>
-          <td>${t.state!=="COMPLETED"&&t.state!=="CANCELLED"?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:""}</td></tr>`).join("")||`<tr><td colspan="6" class="empty">暂无任务</td></tr>`
+          <td>${t.state==="REVIEW"
+            ?`<span style="display:inline-flex;gap:6px"><button class="btn sm" data-review="${esc(t.task_id)}" data-dec="approve">通过</button>
+              <button class="ghost btn sm" data-review="${esc(t.task_id)}" data-dec="rework">打回</button></span>`
+            :""}</td>
+          <td>${t.state!=="COMPLETED"&&t.state!=="CANCELLED"?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:""}</td></tr>`).join("")||`<tr><td colspan="7" class="empty">暂无任务</td></tr>`
       }</tbody></table></div>
     </div>
     <div class="detail-section"><h4>审批请求</h4>
@@ -366,13 +379,12 @@ async function loadDetail(runId){
         <div class="ev-row"><span class="t">${esc((ev.created_at||"").slice(11,19))}</span>
         <span class="k">${esc(ev.kind)}</span><span>${esc((ev.task_id||"")+" ")}${esc(String(ev.payload_json||"").slice(0,80))}</span></div>`).join("")||'<div class="empty">暂无事件</div>'}
     </div>`;
-  box.querySelector('[data-action="new"]').onclick=()=>{
-    const p=prompt("任务说明 prompt：");
-    if(p===null)return;
-    const mode=confirm("写任务（需要受管 worktree）？\n确定=写，取消=只读")?"write":"read_only";
-    api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({prompt:p,access_mode:mode,cwd:mode==="write"?prompt("cwd（受管 worktree 路径）",""):undefined})})
-      .then(r=>r.status===200?(toast("任务已发起","ok"),loadDetail(runId)):toast(r.body.error,"err"));};
+  box.querySelector('[data-action="new"]').onclick=()=>newTaskForm(runId);
+  box.querySelector('[data-action="worktree"]').onclick=async()=>{
+    toast("正在准备受管 worktree…");
+    const r=await api(`/api/runs/${runId}/worktree`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(r.status===200){toast("受管 worktree 已就绪："+(r.body.worktree||""),"ok");loadDetail(runId);}
+    else toast(r.body.error||"准备失败","err");};
   box.querySelector('[data-action="pause"]').onclick=()=>control(runId,"pause");
   box.querySelector('[data-action="resume"]').onclick=()=>control(runId,"resume");
   box.querySelector('[data-action="refresh"]').onclick=()=>loadDetail(runId);
@@ -380,6 +392,37 @@ async function loadDetail(runId){
     const r=await api(`/api/runs/${runId}/tasks/${b.dataset.cancel}/cancel`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-cancel"})});
     if(r.status===200){toast("已请求取消","ok");loadDetail(runId);}else toast(r.body.error,"err");});
+  box.querySelectorAll("[data-review]").forEach(b=>b.onclick=async()=>{
+    const dec=b.dataset.dec;
+    if(dec==="approve"&&!confirm("通过后写任务产出将真实合并进主仓库，且不可撤销。继续？"))return;
+    if(dec==="rework"&&!confirm("打回后任务将回到 READY 重新派发。继续？"))return;
+    const r=await api(`/api/runs/${runId}/tasks/${b.dataset.review}/review`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:dec,comment:"console"})});
+    if(r.status===200){toast(dec==="approve"?"已通过并集成（COMPLETED）":"已打回重新派发","ok");loadDetail(runId);}
+    else toast(r.body.error||"操作失败","err");});
+}
+async function newTaskForm(runId){
+  const mode=await new Promise(res=>{
+    const m=prompt("任务类型：\n1 = 只读（read_only）\n2 = 写（write，需受管 worktree + write_scope）\n回车 = 只读","1");
+    res(m==="2"?"write":"read_only");
+  });
+  const promptText=prompt("任务说明 prompt：");
+  if(promptText===null)return;
+  let body={prompt:promptText,access_mode:mode,timeout_seconds:120};
+  if(mode==="write"){
+    const wt=await api(`/api/runs/${runId}/worktree`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(wt.status!==200){toast((wt.body&&wt.body.error)||"准备受管 worktree 失败","err");return;}
+    const cwd=prompt("cwd（受管 worktree 路径，回车用自动准备的）：",wt.body.worktree||"");
+    if(cwd===null)return;
+    const scopeRaw=prompt("write_scope（逗号分隔的受管范围内相对路径，如 demo/a.txt,demo/b.txt）：");
+    if(scopeRaw===null)return;
+    const scope=scopeRaw.split(",").map(s=>s.trim()).filter(Boolean);
+    if(!scope.length){toast("write_scope 不能为空","err");return;}
+    Object.assign(body,{cwd:cwd||wt.body.worktree,write_scope:scope});
+  }
+  const r=await api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(r.status===200){toast("任务已发起："+r.body.task_id,"ok");loadDetail(runId);}
+  else toast(r.body.error||"发起失败","err");
 }
 async function control(runId,action){
   const r=await api(`/api/runs/${runId}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-"+action})});

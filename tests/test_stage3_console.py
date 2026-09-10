@@ -416,5 +416,169 @@ class LoginHelperTests(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class ConsoleWriteLoopTests(unittest.TestCase):
+    """写任务闭环 UI 后端：worktree 自动准备 + REVIEW 通过/打回。
+
+    项目根是受管 git 仓库（GitWorkspaceManager 初始化）；写任务产出
+    commit 后通过网页审核触发真实集成（MergeExecutor）→ COMPLETED。
+    """
+
+    def setUp(self) -> None:
+        from orchestrator.workspace.git_manager import GitWorkspaceManager
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name) / "proj"
+        self.manager = GitWorkspaceManager(
+            self.project, self.project / ".agent-hub" / "worktrees"
+        )
+        self.base = self.manager.initialize_repository()
+        # db 放项目外（避免污染受管主仓库工作区，影响集成前 clean 检查）
+        self.db_path = Path(self.temp.name) / "state.db"
+        self.store = SQLiteStateStore(self.db_path)
+        self.store.create_run("run-1", "default")
+        self.server = ConsoleHTTPServer(
+            self.store,
+            project_root=self.project,
+            db_path=self.db_path,
+            host="127.0.0.1",
+            port=0,
+        )
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.server.close()
+        self.store.close()
+        self.temp.cleanup()
+
+    def _review_task(self, task_id: str, *, scope: tuple[str, ...] = ("demo/x.txt",)):
+        """造一个停在 REVIEW 的写任务（带一个 attempt）。"""
+        self.store.create_task(
+            "run-1",
+            task_id,
+            access_mode="write",
+            write_scope=scope,
+            required_role_id="worker",
+            prompt=f"write {task_id}",
+            cwd=str(self.project / ".agent-hub" / "worktrees" / "run-1"),
+            timeout_seconds=5,
+        )
+        self.store.transition_task(task_id, TaskState.READY, reason="test")
+        self.store.create_attempt(task_id, f"attempt-{task_id}", f"agent-{task_id}")
+        self.store.transition_task(task_id, TaskState.REVIEW, reason="test")
+
+    def test_worktree_prepare_is_idempotent(self) -> None:
+        status, payload = _request(
+            self.port, "/api/runs/run-1/worktree", method="POST", body={}
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["created"])
+        worktree = Path(payload["worktree"])
+        self.assertTrue(worktree.is_dir())
+        self.assertEqual(payload["base_commit"], self.base)
+        # 幂等：再次准备返回同一 worktree，created=False
+        status, payload2 = _request(
+            self.port, "/api/runs/run-1/worktree", method="POST", body={}
+        )
+        self.assertEqual(status, 200, payload2)
+        self.assertEqual(payload2["worktree"], payload["worktree"])
+        self.assertFalse(payload2["created"])
+        # GET 资源同样可见
+        status, payload3 = _request(self.port, "/api/runs/run-1/worktree")
+        self.assertEqual(status, 200, payload3)
+        self.assertTrue(payload3["worktree"]["exists"])
+
+    def test_review_rework_returns_task_to_ready(self) -> None:
+        self._review_task("task-rw")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-rw/review",
+            method="POST",
+            body={"decision": "rework", "comment": "needs more work"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(self.store.task_state("task-rw"), TaskState.READY)
+        row = self.store.connection.execute(
+            "SELECT decision FROM review_decisions WHERE task_id='task-rw'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["decision"], "REWORK")
+
+    def test_review_approve_write_integrates_to_completed(self) -> None:
+        # 先准备 worktree（网页自动做），再写任务产出文件
+        status, wt = _request(
+            self.port, "/api/runs/run-1/worktree", method="POST", body={}
+        )
+        self.assertEqual(status, 200, wt)
+        worktree = Path(wt["worktree"])
+        target = worktree / "demo" / "x.txt"
+        target.write_text("console-result\n", encoding="utf-8")
+
+        self._review_task("task-ap")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-ap/review",
+            method="POST",
+            body={"decision": "approve", "comment": "looks good"},
+        )
+        self.assertEqual(status, 200, payload)
+        # 真实集成：任务 COMPLETED，主仓库含产出文件
+        self.assertEqual(self.store.task_state("task-ap"), TaskState.COMPLETED)
+        blob = self.manager.read_blob(
+            self.manager.head(self.manager.repository), "demo/x.txt"
+        )[1]
+        self.assertIn(b"console-result", blob)
+        # human APPROVED 落库
+        row = self.store.connection.execute(
+            "SELECT decision FROM review_decisions WHERE task_id='task-ap'"
+        ).fetchone()
+        self.assertEqual(row["decision"], "APPROVED")
+
+    def test_review_approve_read_only_completes_without_git(self) -> None:
+        self.store.create_task(
+            "run-1", "task-ro", required_role_id="worker", prompt="read",
+            cwd=str(self.project), timeout_seconds=5,
+        )
+        self.store.transition_task("task-ro", TaskState.READY, reason="test")
+        self.store.create_attempt("task-ro", "attempt-ro", "agent-ro")
+        self.store.transition_task("task-ro", TaskState.REVIEW, reason="test")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-ro/review",
+            method="POST",
+            body={"decision": "approve"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(self.store.task_state("task-ro"), TaskState.COMPLETED)
+        # 没有 merge 入队（只读无 git 产出）
+        rows = self.store.connection.execute(
+            "SELECT COUNT(*) AS c FROM merge_queue WHERE task_id='task-ro'"
+        ).fetchone()
+        self.assertEqual(rows["c"], 0)
+
+    def test_review_rejects_bad_decision_and_non_review(self) -> None:
+        self._review_task("task-bad")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-bad/review",
+            method="POST",
+            body={"decision": "maybe"},
+        )
+        self.assertEqual(status, 400, payload)
+        # 非 REVIEW 状态拒绝
+        self.store.transition_task("task-bad", TaskState.READY, reason="reset")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-bad/review",
+            method="POST",
+            body={"decision": "approve"},
+        )
+        self.assertEqual(status, 400, payload)
+
+
 if __name__ == "__main__":
     unittest.main()

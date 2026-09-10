@@ -275,6 +275,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "SELECT * FROM agent_instances ORDER BY pool_id, agent_id"
                     ).fetchall()
                 )
+            elif resource == "worktree":
+                cached = self.server._run_worktrees.get(run_id)
+                if cached is not None:
+                    payload = {**cached, "exists": True}
+                else:
+                    path = self.server.project_root / ".agent-hub" / "worktrees" / run_id
+                    payload = {
+                        "run_id": run_id,
+                        "worktree": str(path),
+                        "base_commit": None,
+                        "created": False,
+                        "exists": path.is_dir(),
+                    }
             else:
                 self._send_error_json(404, f"unknown resource {resource}")
                 return
@@ -342,8 +355,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 ),
             ) and self._send_json({"ok": True, "task_id": task_id})
             return
+        if action == "tasks" and len(parts) >= 6 and parts[5] == "review":
+            task_id = parts[4]
+            self._review_task(run_id, task_id, body)
+            return
         if action == "tasks" and len(parts) == 4:
             self._create_task(run_id, body)
+            return
+        if action == "worktree":
+            self._prepare_worktree(run_id)
             return
         if action == "serve" and len(parts) >= 5:
             self._serve_action(run_id, parts[4], body)
@@ -392,6 +412,91 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, f"{type(exc).__name__}: {exc}")
             return
         self._send_json({"ok": True, "task_id": task_id})
+
+    # -- 写任务闭环 ---------------------------------------------------------
+
+    def _prepare_worktree(self, run_id: str) -> None:
+        """幂等准备 run 的受管 worktree（写任务 cwd 必须落在这里）。"""
+        try:
+            info = self.server.ensure_run_worktree(run_id)
+        except Exception as exc:  # noqa: BLE001
+            self._send_error_json(400, f"{type(exc).__name__}: {exc}")
+            return
+        self._send_json({"ok": True, **info})
+
+    def _review_task(
+        self, run_id: str, task_id: str, body: dict[str, Any]
+    ) -> None:
+        """REVIEW 人工审核：approve=通过（write 产出 commit→入队→集成→COMPLETED；
+        read 直接 COMPLETED）；rework=打回（记录 REWORK + reassign 重新派发）。"""
+        decision = str(body.get("decision") or "")
+        if decision not in {"approve", "rework"}:
+            self._send_error_json(400, "decision must be approve or rework")
+            return
+        comment = str(body.get("comment") or "")
+
+        def run(controller: Any, authority: Any) -> None:
+            store = self.server.store
+            task = store.connection.execute(
+                "SELECT state, access_mode, write_scope_json FROM tasks "
+                "WHERE task_id=? AND run_id=?",
+                (task_id, run_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            if str(task["state"]) != "REVIEW":
+                raise ValueError(f"task {task_id} is {task['state']}, must be REVIEW")
+            attempt = store.connection.execute(
+                "SELECT attempt_id FROM attempts WHERE task_id=? "
+                "ORDER BY attempt_number DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            attempt_id = str(attempt["attempt_id"]) if attempt is not None else None
+            detail = {"comment": comment, "decided_by": "console"}
+            if decision == "rework":
+                store.record_review_decision(
+                    run_id, task_id, attempt_id=attempt_id, layer="human",
+                    decision="REWORK", decided_by="console", detail=detail,
+                    authority=authority,
+                )
+                store.reassign_task(
+                    run_id, task_id, controller, authority, reason="console-rework"
+                )
+                return
+            # approve
+            store.record_review_decision(
+                run_id, task_id, attempt_id=attempt_id, layer="human",
+                decision="APPROVED", decided_by="console", detail=detail,
+                authority=authority,
+            )
+            if str(task["access_mode"]) == "read_only":
+                # 只读任务无 git 产出：直接终态（REVIEW -> COMPLETED 合法）
+                store.transition_task(task_id, TaskState.COMPLETED, reason="console-approve")
+                return
+            # 写任务：worktree 产出 commit -> 入队 -> 真实集成
+            if attempt_id is None:
+                raise ValueError("no attempt found to settle")
+            from orchestrator.workspace.merge_executor import MergeExecutor
+
+            info = self.server.ensure_run_worktree(run_id)
+            worktree = Path(info["worktree"])
+            scope = json.loads(task["write_scope_json"] or "[]")
+            result_commit = self.server.git_manager().commit_managed_changes(
+                worktree, tuple(scope), f"console approve {task_id}"
+            )
+            store.enqueue_merge(
+                run_id, task_id, attempt_id, result_commit,
+                str(info["base_commit"]), controller, authority=authority,
+                reason="console-review-approved",
+            )
+            result = MergeExecutor(store, self.server.git_manager()).run_merge_once(
+                run_id, controller, authority
+            )
+            if result.get("status") == "busy":
+                raise ValueError("merge queue busy; retry")
+
+        if self._with_control(run_id, run):
+            self._send_json({"ok": True, "decision": decision})
 
     def _serve_action(self, run_id: str, action: str, body: dict[str, Any]) -> None:
         manager = self.server.serve_manager
@@ -457,11 +562,88 @@ class ConsoleHTTPServer(HTTPServer):
         self.initial_run_id = initial_run_id
         self.worktree = worktree
         self.serve_manager = ServeProcessManager(project_root)
+        self._git_manager: Any | None = None
+        self._run_worktrees: dict[str, dict[str, Any]] = {}
         super().__init__((host, port), ConsoleHandler)
 
     def close(self) -> None:
         self.serve_manager.shutdown_all()
         self.server_close()
+
+    # -- 写任务闭环：受管 worktree ------------------------------------------
+
+    def git_manager(self) -> Any:
+        """懒创建受管 GitWorkspaceManager（项目仓库为受管主仓库）。"""
+        if self._git_manager is None:
+            from orchestrator.workspace.git_manager import GitWorkspaceManager
+
+            self._git_manager = GitWorkspaceManager(
+                self.project_root,
+                self.project_root / ".agent-hub" / "worktrees",
+            )
+        return self._git_manager
+
+    def ensure_run_worktree(self, run_id: str) -> dict[str, Any]:
+        """幂等：为 run 准备受管 worktree（存在则复用）。
+
+        返回 {run_id, worktree, base_commit, created}。首次创建前把项目仓库
+        标记为受管（agenthub.managed=true，幂等 git config）。
+        """
+        cached = self._run_worktrees.get(run_id)
+        if cached is not None:
+            return {**cached, "created": False}
+        import subprocess
+
+        manager = self.git_manager()
+        base = manager.head(self.project_root)
+        worktree = manager.worktrees_root / run_id
+        created = False
+        if not worktree.is_dir():
+            # 主仓库标记受管（幂等）；已标记时忽略失败
+            subprocess.run(
+                ["git", "-C", str(self.project_root), "config",
+                 "agenthub.managed", "true"],
+                check=False,
+            )
+            # 写任务 worktree 建在项目内 .agent-hub/ 下；若该目录未被忽略，
+            # 注入仓库本地 exclude（.git/info/exclude），保证集成前
+            # 「integration repository must be clean」检查不被 untracked 干扰。
+            self._exclude_agent_hub()
+            worktree = manager.create_worktree(run_id, base)
+            created = True
+        info: dict[str, Any] = {
+            "run_id": run_id,
+            "worktree": str(worktree),
+            "base_commit": base,
+            "created": created,
+        }
+        self._run_worktrees[run_id] = info
+        return dict(info)
+
+    def _exclude_agent_hub(self) -> None:
+        """仓库本地忽略 .agent-hub/（.git/info/exclude，幂等，不改 .gitignore）。"""
+        import subprocess
+
+        check = subprocess.run(
+            ["git", "-C", str(self.project_root), "check-ignore",
+             ".agent-hub/"],
+            capture_output=True,
+            check=False,
+        )
+        if check.returncode == 0:
+            return  # 已被忽略（.gitignore 或已有 exclude）
+        exclude = self.project_root / ".git" / "info" / "exclude"
+        try:
+            text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        except OSError:
+            return
+        if ".agent-hub/" not in text:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(
+                (text.rstrip() + "\n" if text.strip() else "")
+                + ".agent-hub/\n",
+                encoding="utf-8",
+            )
 
 
 def find_free_port(host: str, start: int, tries: int = 20) -> int | None:
