@@ -132,8 +132,11 @@ def run_codebuddy_write(
         "StructuredOutput",
         "--json-schema",
         json.dumps(output_schema, separators=(",", ":")),
+        # 登录凭据由 CodeBuddy 保存在 Windows 用户级目录；只加载
+        # project 会让刚完成的交互登录在真实 PoC 中表现为 Worker 失败。
+        # 与统一 CodeBuddy Adapter 保持一致，同时保留项目规则。
         "--setting-sources",
-        "project",
+        "user,project",
         "--model",
         "glm-5.3",
     ]
