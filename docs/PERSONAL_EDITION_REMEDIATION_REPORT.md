@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1、R2、R3、R4 已完成；整体整改保持 `stage3: checkpoint`，R5–R8 尚未开始。**
+状态：**R0、R1、R2、R3、R4、R5 已完成；整体整改保持 `stage3: checkpoint`，R6–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -222,8 +222,36 @@ Fake 主管可以生成 v2 计划、在人工批准前保持零 Worker 派发、
 
 ### 3. R4 出口与限制
 
-Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → merge 入队”的最小闭环，并保留旧候选和证据。R5 仍需补耐久消息、取消确认和预算回收；真实后端的独立审核与返工继续保持未验证，不宣称个人版最终验收。
+Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → merge 入队”的最小闭环，并保留旧候选和证据。真实后端的独立审核与返工继续保持未验证，不宣称个人版最终验收。
+
+## R5：消息投递、取消与预算
+
+更新时间：2026-09-11
+状态：**R5 已完成（本地 Fake/SQLite/fencing 证据通过；真实后端运行中引导与取消确认仍未验证）。**
+
+### 1. 已实现
+
+- schema v20 新增 `message_deliveries`，按每个 recipient 保存 `QUEUED`、`DELIVERED`、`ACKNOWLEDGED`、`FAILED`、`EXPIRED`、attempts、租约和错误；旧 `messages` 保留 idempotency/correlation，并支持 attempt、plan revision、source、message type、target Agent、有效期。
+- `append_message` 在同一事务创建消息和投递记录；`claim_message_deliveries`、`acknowledge_message`、`fail_message_delivery`、`expire_message_deliveries` 均受 Run controller fencing 保护，过期未 ack 可重投，达到五次进入死信。旧扩展 kind 保持兼容。
+- `serve` 可在唯一 controller 下消费消息 handler；控制台只提交/展示意图，新增 `deliveries`、`progress`、`budget-reservations` 资源，不形成第二个消息写者。
+- 取消活动调用时由 Hub 事务性发送 `terminate` 信号；后端未确认停止时保留 `backend_may_still_run`、Agent、Session 和 assignment lease，不立即复用受控资源；`confirm_backend_stopped` 后才释放并确认 terminate。
+- schema v20 新增 `progress_heartbeats` 和 `budget_reservations`；attempt 级心跳受 generation/lease fencing，派发时原子登记预算 reservation，终态结算，预算原有 calls/turns/tokens/cost 限制继续生效。
+
+### 2. R5 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 多 recipient、重复 ack、重启后未 ack 重投 | PASS | `tests/test_personal_r5.py::R5DeliveryTests`（7 项） |
+| 过期消息、旧 attempt 引导隔离 | PASS | `tests/test_personal_r5.py::R5DeliveryTests.test_expired_delivery_is_not_claimed`、`test_old_attempt_guidance_is_failed_instead_of_delivered` |
+| 取消未确认资源保持占用，确认后释放 | PASS | `tests/test_personal_r5.py::R5CancellationTests.test_unconfirmed_cancel_holds_agent_until_stop_confirmation` |
+| 心跳 generation fencing、schema v20 | PASS | `tests/test_personal_r5.py::R5DeliveryTests.test_progress_heartbeat_and_inactivity_are_attempt_fenced`、`R5BudgetTests` |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；331 项，330 通过、1 跳过 |
+| 真实后端即时引导/取消确认 | **未验证** | CodeBuddy 仍没有可复现实测的活动 turn 确认；不把 Fake/SQLite 证据写成真实后端通过。 |
+
+### 3. R5 出口与限制
+
+本地消息不会因进程重启或重复消费静默丢失，旧尝试引导不能进入当前执行，取消未确认不会提前复用 Agent/Session，预算 reservation 和进度证据均落 SQLite。R6 继续实现项目—角色—Agent 对话工作台；真实 Codex/CodeBuddy 活动引导与取消确认继续保持未验证。
 
 ## 5. 下一步
 
-R4 已完成，下一切片是 R5：补齐持久消息投递、取消/晚到结果语义和预算原子预留。
+R5 已完成，下一切片是 R6：项目—角色—Agent 对话工作台与用户引导。

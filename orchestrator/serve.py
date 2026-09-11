@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -28,6 +29,8 @@ async def serve(
     controller: ControllerToken | None = None,
     git_manager: Any | None = None,
     outbox_deliver: Any | None = None,
+    message_handler: Any | None = None,
+    message_consumer_id: str | None = None,
     interval: float = 1.0,
     controller_lease_seconds: int = 300,
     stop_event: asyncio.Event | None = None,
@@ -41,8 +44,10 @@ async def serve(
     leases, dispatches ready tasks, sweeps cancel requests, reconciles agent
     pools, and—when a ``git_manager`` is provided—consumes the persistent
     Merge Queue and Transactional Outbox with real Git integration and the
-    optional ``outbox_deliver`` hook. The loop stops cleanly on
-    ``stop_event`` or after ``max_ticks`` cycles.
+    optional ``outbox_deliver`` hook. Message delivery is also owned by this
+    fenced loop when ``message_handler`` is supplied; callers only enqueue
+    intents and never mutate delivery state directly. The loop stops cleanly
+    on ``stop_event`` or after ``max_ticks`` cycles.
     """
     if interval <= 0:
         raise ValueError("interval must be positive")
@@ -155,6 +160,32 @@ async def serve(
                     )
                 if outbox_dispatcher is not None:
                     outbox_dispatcher.run_once(run_id, token, authority_token)
+                store.expire_message_deliveries(run_id, controller=token)
+                if message_handler is not None:
+                    consumer = message_consumer_id or owner
+                    deliveries = store.claim_message_deliveries(
+                        run_id,
+                        controller=token,
+                        consumer_id=consumer,
+                        limit=100,
+                    )
+                    for delivery in deliveries:
+                        try:
+                            outcome = message_handler(delivery)
+                            if inspect.isawaitable(outcome):
+                                await outcome
+                            store.acknowledge_message(
+                                delivery["delivery_id"],
+                                controller=token,
+                                consumer_id=consumer,
+                            )
+                        except Exception as error:  # noqa: BLE001
+                            store.fail_message_delivery(
+                                delivery["delivery_id"],
+                                controller=token,
+                                consumer_id=consumer,
+                                reason=f"handler:{type(error).__name__}: {error}",
+                            )
                 if team_spec is not None:
                     for pool in team_spec.agent_pools:
                         reconcile_pool_once(store, run_id, pool)

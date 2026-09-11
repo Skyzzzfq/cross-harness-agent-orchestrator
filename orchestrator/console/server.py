@@ -471,6 +471,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 payload = store.list_task_results(run_id)
             elif resource == "evidence":
                 payload = store.list_verification_evidence(run_id)
+            elif resource == "deliveries":
+                payload = store.list_message_deliveries(run_id)
+            elif resource == "progress":
+                payload = _rows(
+                    store.connection.execute(
+                        """
+                        SELECT * FROM progress_heartbeats
+                        WHERE run_id=? ORDER BY observed_at, heartbeat_id
+                        """,
+                        (run_id,),
+                    ).fetchall()
+                )
+            elif resource == "budget-reservations":
+                payload = store.list_budget_reservations(run_id)
             elif resource == "workspace":
                 row = store.connection.execute(
                     "SELECT * FROM run_workspaces WHERE run_id=?", (run_id,)

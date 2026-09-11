@@ -131,6 +131,14 @@ class MessageEnvelope:
     idempotency_key: str = ""
     created_at: str = field(default_factory=utc_now)
     reply_to: str | None = None
+    # R5：消息既是审计记录，也是可恢复投递的输入。旧调用只填写 kind，
+    # 新调用可以显式绑定当前尝试、计划 revision 和目标 Agent。
+    target_agent_id: str | None = None
+    attempt_id: str | None = None
+    plan_revision: int | None = None
+    source: str = "system"
+    message_type: str = ""
+    expires_at: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -149,6 +157,11 @@ class MessageEnvelope:
             raise ValueError("recipients must not be empty")
         if self.sequence < 1:
             raise ValueError("sequence must be at least 1")
+        if self.plan_revision is not None and self.plan_revision < 1:
+            raise ValueError("plan_revision must be at least 1")
+        _required(self.source, "source")
+        if self.message_type and not self.message_type.strip():
+            raise ValueError("message_type must not be blank")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

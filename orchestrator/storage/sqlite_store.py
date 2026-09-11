@@ -25,6 +25,7 @@ from orchestrator.core.models import (
     AuthorityToken,
     ControllerToken,
     MessageEnvelope,
+    Recipient,
     RoleBindingState,
     SessionState,
     TaskState,
@@ -143,12 +144,23 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 
 class SQLiteStateStore:
     # B3（P1-06）：Outbox 投递失败的最大重试次数，超过进入死信
     MAX_OUTBOX_ATTEMPTS = 5
+    # R5：消息投递采用 at-least-once；达到上限后进入 FAILED，等待人工处理。
+    MAX_MESSAGE_ATTEMPTS = 5
+    MESSAGE_KINDS = {
+        "dispatch",
+        "status_update",
+        "result",
+        "review",
+        "user_guidance",
+        "terminate",
+        "ack",
+    }
 
     def __init__(
         self,
@@ -2252,6 +2264,23 @@ class SQLiteStateStore:
                     controller.epoch,
                 ),
             )
+            self.connection.execute(
+                """
+                INSERT INTO budget_reservations(
+                    reservation_id, run_id, task_id, attempt_id, generation,
+                    call_id, status, reserved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'RESERVED', ?)
+                """,
+                (
+                    f"budget-{uuid.uuid4().hex[:16]}",
+                    run_id,
+                    row["task_id"],
+                    attempt_id,
+                    generation,
+                    call_id,
+                    now_value,
+                ),
+            )
             task_updated = self.connection.execute(
                 """
                 UPDATE tasks SET state = 'ACTIVE', version = version + 1,
@@ -2575,7 +2604,7 @@ class SQLiteStateStore:
         for attempt in attempts:
             call = self.connection.execute(
                 """
-                SELECT call_id, state FROM backend_calls
+                SELECT call_id, state, agent_id, session_ref_id FROM backend_calls
                 WHERE attempt_id = ? AND state IN (
                     'starting', 'running', 'cancel_requested'
                 )
@@ -2584,6 +2613,28 @@ class SQLiteStateStore:
             ).fetchone()
             if call is None:
                 continue
+            terminate_message = MessageEnvelope(
+                message_id=f"msg-terminate-{call['call_id']}",
+                team_id=str(
+                    self.connection.execute(
+                        "SELECT team_id FROM runs WHERE run_id = ?", (run_id,)
+                    ).fetchone()["team_id"]
+                ),
+                run_id=run_id,
+                task_id=task_id,
+                sender_agent_id="hub",
+                recipients=(Recipient("agent", str(call["agent_id"])),),
+                kind="terminate",
+                message_type="terminate",
+                source="hub",
+                payload={"call_id": str(call["call_id"]), "reason": reason[:500]},
+                correlation_id=str(call["call_id"]),
+                idempotency_key=f"terminate:{call['call_id']}",
+                target_agent_id=str(call["agent_id"]),
+                attempt_id=str(attempt["attempt_id"]),
+                expires_at=(self._aware_datetime(now) + timedelta(seconds=30)).isoformat(),
+            )
+            self._append_message_tx(terminate_message)
             if call["state"] == "starting":
                 self.connection.execute(
                     """
@@ -2757,6 +2808,95 @@ class SQLiteStateStore:
             "SELECT state FROM backend_calls WHERE call_id = ?", (call_id,)
         ).fetchone()
         return row is not None and row["state"] == "cancel_requested"
+
+    def _ack_terminate_messages_tx(
+        self,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        call_id: str,
+        now: str,
+    ) -> None:
+        """Mark the cancellation signal acknowledged when the call reaches a terminal state."""
+        rows = self.connection.execute(
+            """
+            SELECT d.delivery_id
+            FROM message_deliveries d
+            JOIN messages m ON m.message_id = d.message_id
+            WHERE d.run_id=? AND d.task_id=?
+              AND d.status IN ('QUEUED', 'DELIVERED')
+              AND json_extract(m.envelope_json, '$.attempt_id') = ?
+              AND json_extract(m.envelope_json, '$.message_type') = 'terminate'
+              AND json_extract(m.envelope_json, '$.payload.call_id') = ?
+            """,
+            (run_id, task_id, attempt_id, call_id),
+        ).fetchall()
+        for row in rows:
+            self.connection.execute(
+                """
+                UPDATE message_deliveries
+                SET status='ACKNOWLEDGED', acknowledged_at=?,
+                    consumer_id='backend', lease_until=NULL
+                WHERE delivery_id=? AND status IN ('QUEUED', 'DELIVERED')
+                """,
+                (now, row["delivery_id"]),
+            )
+            self._append_event(
+                run_id, task_id, attempt_id, "message.acknowledged",
+                "DELIVERED", "ACKNOWLEDGED",
+                {"delivery_id": row["delivery_id"], "call_id": call_id, "source": "backend"},
+            )
+
+    def confirm_backend_stopped(
+        self,
+        call_id: str,
+        *,
+        controller: ControllerToken,
+        reason: str = "backend-stop-confirmed",
+    ) -> str:
+        """Release a resource only after a previously unconfirmed cancel is confirmed."""
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                """
+                SELECT c.*, a.generation AS attempt_generation
+                FROM backend_calls c JOIN attempts a ON a.attempt_id=c.attempt_id
+                WHERE c.call_id=?
+                """,
+                (call_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(call_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("backend call belongs to another Run")
+            if not bool(row["backend_may_still_run"]):
+                self.connection.commit()
+                return "already_confirmed"
+            self.connection.execute(
+                "UPDATE backend_calls SET backend_may_still_run=0 WHERE call_id=?",
+                (call_id,),
+            )
+            self._ack_terminate_messages_tx(
+                row["run_id"], row["task_id"], row["attempt_id"], call_id, now
+            )
+            self._release_attempt_resources_tx(
+                str(row["attempt_id"]), int(row["attempt_generation"]),
+                str(row["task_id"]), reason, now,
+            )
+            self._append_event(
+                row["run_id"], row["task_id"], row["attempt_id"],
+                "backend.stop.confirmed", row["state"], row["state"],
+                {"call_id": call_id, "reason": reason},
+            )
+            self.connection.commit()
+            return "confirmed"
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def _write_scope_conflicts(
         self,
@@ -4088,6 +4228,17 @@ class SQLiteStateStore:
             "max_cost_decimal": row["max_cost_decimal"],
         }
 
+    def list_budget_reservations(
+        self, run_id: str, *, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM budget_reservations WHERE run_id=?"
+        params: list[Any] = [run_id]
+        if status is not None:
+            query += " AND status=?"
+            params.append(status)
+        query += " ORDER BY reserved_at, reservation_id"
+        return [dict(row) for row in self.connection.execute(query, params).fetchall()]
+
     def record_outbox_intent(
         self,
         run_id: str,
@@ -4476,20 +4627,34 @@ class SQLiteStateStore:
                     call_id,
                 ),
             )
-            if attempt_target is not None and task_target is not None:
-                self.connection.execute(
-                    """
-                    UPDATE assignment_leases SET state = 'RELEASED', closed_at = ?,
-                        close_reason = ?
-                    WHERE attempt_id = ? AND generation = ? AND state = 'ACTIVE'
-                    """,
-                    (
-                        now,
-                        f"backend-{snapshot.state.value}",
-                        row["attempt_id"],
-                        row["generation"],
-                    ),
+            self.connection.execute(
+                """
+                UPDATE budget_reservations
+                SET status='SETTLED', settled_at=?
+                WHERE call_id=? AND status='RESERVED'
+                """,
+                (now, call_id),
+            )
+            if cancel_convergence and not snapshot.backend_may_still_run:
+                self._ack_terminate_messages_tx(
+                    row["run_id"], row["task_id"], row["attempt_id"], call_id, now
                 )
+            if attempt_target is not None and task_target is not None:
+                resource_release_allowed = not snapshot.backend_may_still_run
+                if resource_release_allowed:
+                    self.connection.execute(
+                        """
+                        UPDATE assignment_leases SET state = 'RELEASED', closed_at = ?,
+                            close_reason = ?
+                        WHERE attempt_id = ? AND generation = ? AND state = 'ACTIVE'
+                        """,
+                        (
+                            now,
+                            f"backend-{snapshot.state.value}",
+                            row["attempt_id"],
+                            row["generation"],
+                        ),
+                    )
                 if retry_available_at is not None:
                     self.connection.execute(
                         """
@@ -4523,23 +4688,30 @@ class SQLiteStateStore:
                         row["task_id"],
                     ),
                 )
-                self.connection.execute(
-                    """
-                    UPDATE agent_instances
-                    SET status = CASE WHEN status = 'BUSY' THEN 'IDLE' ELSE status END,
-                        current_task_id = NULL, updated_at = ?
-                    WHERE agent_id = ? AND current_task_id = ?
-                      AND status IN ('BUSY', 'DRAINING')
-                    """,
-                    (now, row["agent_id"], row["task_id"]),
-                )
-                self.connection.execute(
-                    """
-                    UPDATE backend_sessions SET state = 'IDLE', updated_at = ?
-                    WHERE session_ref_id = ? AND state = 'ACTIVE'
-                    """,
-                    (now, row["session_ref_id"]),
-                )
+                if resource_release_allowed:
+                    self.connection.execute(
+                        """
+                        UPDATE agent_instances
+                        SET status = CASE WHEN status = 'BUSY' THEN 'IDLE' ELSE status END,
+                            current_task_id = NULL, updated_at = ?
+                        WHERE agent_id = ? AND current_task_id = ?
+                          AND status IN ('BUSY', 'DRAINING')
+                        """,
+                        (now, row["agent_id"], row["task_id"]),
+                    )
+                    self.connection.execute(
+                        """
+                        UPDATE backend_sessions SET state = 'IDLE', updated_at = ?
+                        WHERE session_ref_id = ? AND state = 'ACTIVE'
+                        """,
+                        (now, row["session_ref_id"]),
+                    )
+                else:
+                    self._append_event(
+                        row["run_id"], row["task_id"], row["attempt_id"],
+                        "backend.resource.held", row["state"], row["state"],
+                        {"call_id": call_id, "reason": "backend_may_still_run"},
+                    )
             event_kind = "backend.call.late_result" if late_result else "backend.call.finished"
             self._append_event(
                 row["run_id"],
@@ -4668,6 +4840,14 @@ class SQLiteStateStore:
                   AND state IN ('starting', 'running', 'cancel_requested')
                 """,
                 (now, now, call_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE budget_reservations
+                SET status='SETTLED', settled_at=?
+                WHERE call_id=? AND status='RESERVED'
+                """,
+                (now, call_id),
             )
 
             outcome = "orphaned"
@@ -4848,6 +5028,14 @@ class SQLiteStateStore:
                   AND state IN ('starting', 'running', 'cancel_requested')
                 """,
                 (utc_now(), utc_now(), call_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE budget_reservations
+                SET status='SETTLED', settled_at=?
+                WHERE call_id=? AND status='RESERVED'
+                """,
+                (utc_now(), call_id),
             )
             self._append_event(
                 row["run_id"],
@@ -6052,6 +6240,119 @@ class SQLiteStateStore:
                 raise FencedAttemptError("attempt lease is stale or generation mismatched")
         return expires_at
 
+    def record_progress_heartbeat(
+        self,
+        attempt_id: str,
+        generation: int,
+        *,
+        phase: str,
+        progress: Mapping[str, Any] | None = None,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a small progress checkpoint under the attempt lease fence."""
+        if not phase.strip():
+            raise ValueError("phase must not be empty")
+        as_of = self._aware_datetime(now)
+        now_value = as_of.isoformat()
+        payload = dict(progress or {})
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT a.*, t.run_id, t.state AS task_state,
+                       l.state AS lease_state, l.expires_at
+                FROM attempts a
+                JOIN tasks t ON t.task_id=a.task_id
+                JOIN assignment_leases l ON l.attempt_id=a.attempt_id
+                WHERE a.attempt_id=?
+                """,
+                (attempt_id,),
+            ).fetchone()
+            if (
+                row is None
+                or int(row["generation"]) != generation
+                or row["lease_state"] != "ACTIVE"
+                or row["expires_at"] <= now_value
+                or row["state"] not in {
+                    AttemptState.ASSIGNED.value,
+                    AttemptState.RUNNING.value,
+                    AttemptState.CANCEL_REQUESTED.value,
+                }
+            ):
+                raise FencedAttemptError("attempt lease is stale or generation mismatched")
+            heartbeat_id = f"heartbeat-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO progress_heartbeats(
+                    heartbeat_id, run_id, task_id, attempt_id, generation,
+                    phase, progress_json, observed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    heartbeat_id,
+                    row["run_id"],
+                    row["task_id"],
+                    attempt_id,
+                    generation,
+                    phase[:100],
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    now_value,
+                ),
+            )
+            self._append_event(
+                row["run_id"], row["task_id"], attempt_id,
+                "attempt.progress", row["state"], row["state"],
+                {"heartbeat_id": heartbeat_id, "phase": phase[:100], "progress": payload},
+            )
+            self.connection.commit()
+            return {
+                "heartbeat_id": heartbeat_id,
+                "run_id": row["run_id"],
+                "task_id": row["task_id"],
+                "attempt_id": attempt_id,
+                "generation": generation,
+                "phase": phase[:100],
+                "progress": payload,
+                "observed_at": now_value,
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def list_inactive_attempts(
+        self,
+        run_id: str,
+        *,
+        idle_seconds: int,
+        now: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return active attempts whose latest progress/lease heartbeat is old."""
+        if idle_seconds < 1:
+            raise ValueError("idle_seconds must be at least 1")
+        cutoff = (
+            self._aware_datetime(now) - timedelta(seconds=idle_seconds)
+        ).isoformat()
+        rows = self.connection.execute(
+            """
+            SELECT a.attempt_id, a.task_id, a.agent_id, a.generation,
+                   a.state, l.heartbeat_at AS lease_heartbeat_at,
+                   MAX(p.observed_at) AS progress_at,
+                   MAX(COALESCE(p.observed_at, l.heartbeat_at)) AS last_activity
+            FROM attempts a
+            JOIN tasks t ON t.task_id=a.task_id
+            JOIN assignment_leases l ON l.attempt_id=a.attempt_id
+            LEFT JOIN progress_heartbeats p ON p.attempt_id=a.attempt_id
+            WHERE t.run_id=? AND a.state IN ('ASSIGNED', 'RUNNING', 'CANCEL_REQUESTED')
+              AND l.state='ACTIVE'
+            GROUP BY a.attempt_id, a.task_id, a.agent_id, a.generation,
+                     a.state, l.heartbeat_at
+            HAVING last_activity <= ?
+            ORDER BY last_activity, a.attempt_id
+            """,
+            (run_id, cutoff),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def submit_attempt(
         self,
         attempt_id: str,
@@ -6354,6 +6655,8 @@ class SQLiteStateStore:
                 "approval_requests",
                 "assignment_leases",
                 "backend_calls",
+                "budget_reservations",
+                "message_deliveries",
                 "messages",
                 "review_decisions",
                 "merge_queue",
@@ -6418,37 +6721,368 @@ class SQLiteStateStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def append_message(self, message: MessageEnvelope) -> None:
-        with self.connection:
+    def _append_message_tx(self, message: MessageEnvelope) -> None:
+        """Insert a message and its recipient deliveries in the caller's tx."""
+        kind = message.message_type or message.kind
+        # 旧版本允许扩展 kind（例如 artifact.submitted）；R5 只为标准
+        # kind 提供语义，不破坏已有审计消息。
+        if not kind.strip():
+            raise ValueError("message kind must not be empty")
+        if message.target_agent_id:
+            recipients = tuple(
+                recipient
+                for recipient in message.recipients
+                if recipient.id == message.target_agent_id
+            )
+            if not recipients:
+                raise ValueError("target_agent_id must match a recipient")
+        else:
+            recipients = message.recipients
+        envelope = message.to_dict()
+        envelope["message_type"] = kind
+        self.connection.execute(
+            """
+            INSERT INTO messages(
+                message_id, idempotency_key, run_id, task_id,
+                envelope_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                message.message_id,
+                message.idempotency_key,
+                message.run_id,
+                message.task_id,
+                json.dumps(envelope, ensure_ascii=False, sort_keys=True),
+                message.created_at,
+            ),
+        )
+        for recipient in recipients:
             self.connection.execute(
                 """
-                INSERT INTO messages(
-                    message_id, idempotency_key, run_id, task_id,
-                    envelope_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO message_deliveries(
+                    delivery_id, message_id, run_id, task_id,
+                    recipient_type, recipient_id, status, attempts,
+                    available_at, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', 0, ?, ?, ?)
                 """,
                 (
+                    f"delivery-{uuid.uuid4().hex[:16]}",
                     message.message_id,
-                    message.idempotency_key,
                     message.run_id,
                     message.task_id,
-                    json.dumps(message.to_dict(), ensure_ascii=False, sort_keys=True),
+                    recipient.type,
+                    recipient.id,
+                    message.created_at,
+                    message.expires_at,
                     message.created_at,
                 ),
             )
-            self._append_event(
-                message.run_id,
-                message.task_id,
-                None,
-                "message.persisted",
-                None,
-                None,
-                {
-                    "message_id": message.message_id,
-                    "kind": message.kind,
-                    "sequence": message.sequence,
-                },
+        self._append_event(
+            message.run_id,
+            message.task_id,
+            message.attempt_id,
+            "message.persisted",
+            None,
+            "QUEUED",
+            {
+                "message_id": message.message_id,
+                "kind": kind,
+                "sequence": message.sequence,
+                "source": message.source,
+                "attempt_id": message.attempt_id,
+            },
+        )
+
+    def append_message(self, message: MessageEnvelope) -> None:
+        """Persist a protocol intent and durable per-recipient deliveries."""
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._append_message_tx(message)
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def list_message_deliveries(
+        self,
+        run_id: str,
+        *,
+        task_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT d.*, m.envelope_json, m.created_at AS message_created_at
+            FROM message_deliveries d
+            JOIN messages m ON m.message_id = d.message_id
+            WHERE d.run_id = ?
+        """
+        params: list[Any] = [run_id]
+        if task_id is not None:
+            query += " AND d.task_id = ?"
+            params.append(task_id)
+        if status is not None:
+            query += " AND d.status = ?"
+            params.append(status)
+        query += " ORDER BY d.created_at, d.delivery_id"
+        return [dict(row) for row in self.connection.execute(query, params).fetchall()]
+
+    def _message_delivery_is_stale_tx(self, envelope: Mapping[str, Any]) -> str | None:
+        """Return a deterministic reason when guidance targets a closed attempt."""
+        if str(envelope.get("message_type") or envelope.get("kind") or "") != "user_guidance":
+            return None
+        attempt_id = envelope.get("attempt_id")
+        if not attempt_id:
+            return "guidance_missing_attempt"
+        row = self.connection.execute(
+            "SELECT state FROM attempts WHERE attempt_id = ?", (str(attempt_id),)
+        ).fetchone()
+        if row is None or str(row["state"]) not in {
+            AttemptState.ASSIGNED.value,
+            AttemptState.RUNNING.value,
+            AttemptState.CANCEL_REQUESTED.value,
+        }:
+            return "stale_attempt"
+        return None
+
+    def expire_message_deliveries(
+        self,
+        run_id: str,
+        *,
+        controller: ControllerToken,
+        now: str | None = None,
+    ) -> int:
+        """Expire queued/in-flight messages without bypassing controller fencing."""
+        now_value = self._aware_datetime(now).isoformat()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now_value)
+            if controller.run_id != run_id:
+                raise FencedControllerError("message run does not match controller")
+            rows = self.connection.execute(
+                """
+                SELECT delivery_id, task_id FROM message_deliveries
+                WHERE run_id = ? AND status IN ('QUEUED', 'DELIVERED')
+                  AND expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (run_id, now_value),
+            ).fetchall()
+            for row in rows:
+                self.connection.execute(
+                    """
+                    UPDATE message_deliveries
+                    SET status='EXPIRED', failed_at=?, lease_until=NULL,
+                        last_error='message expired'
+                    WHERE delivery_id=? AND status IN ('QUEUED', 'DELIVERED')
+                    """,
+                    (now_value, row["delivery_id"]),
+                )
+                self._append_event(
+                    run_id, row["task_id"], None, "message.expired",
+                    "DELIVERED", "EXPIRED", {"delivery_id": row["delivery_id"]},
+                )
+            self.connection.commit()
+            return len(rows)
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def claim_message_deliveries(
+        self,
+        run_id: str,
+        *,
+        controller: ControllerToken,
+        consumer_id: str,
+        limit: int = 100,
+        lease_seconds: int = 60,
+        now: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Claim queued deliveries; expired delivery leases are safely redelivered."""
+        if not consumer_id.strip():
+            raise ValueError("consumer_id must not be empty")
+        if limit < 1 or lease_seconds < 1:
+            raise ValueError("limit and lease_seconds must be positive")
+        as_of = self._aware_datetime(now)
+        now_value = as_of.isoformat()
+        lease_until = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now_value)
+            if controller.run_id != run_id:
+                raise FencedControllerError("message run does not match controller")
+            self.connection.execute(
+                """
+                UPDATE message_deliveries
+                SET status='QUEUED', consumer_id=NULL, lease_until=NULL
+                WHERE run_id=? AND status='DELIVERED' AND lease_until IS NOT NULL
+                  AND lease_until <= ?
+                """,
+                (run_id, now_value),
             )
+            rows = self.connection.execute(
+                """
+                SELECT d.*, m.envelope_json
+                FROM message_deliveries d
+                JOIN messages m ON m.message_id = d.message_id
+                WHERE d.run_id=? AND d.status='QUEUED' AND d.available_at <= ?
+                  AND (d.expires_at IS NULL OR d.expires_at > ?)
+                ORDER BY d.created_at, d.delivery_id LIMIT ?
+                """,
+                (run_id, now_value, now_value, limit),
+            ).fetchall()
+            claimed: list[dict[str, Any]] = []
+            for row in rows:
+                envelope = json.loads(str(row["envelope_json"]))
+                stale_reason = self._message_delivery_is_stale_tx(envelope)
+                if stale_reason is not None:
+                    self.connection.execute(
+                        """
+                        UPDATE message_deliveries
+                        SET status='FAILED', failed_at=?, last_error=?, lease_until=NULL
+                        WHERE delivery_id=? AND status='QUEUED'
+                        """,
+                        (now_value, stale_reason, row["delivery_id"]),
+                    )
+                    self._append_event(
+                        run_id, row["task_id"], envelope.get("attempt_id"),
+                        "message.failed", "QUEUED", "FAILED",
+                        {"delivery_id": row["delivery_id"], "reason": stale_reason},
+                    )
+                    continue
+                updated = self.connection.execute(
+                    """
+                    UPDATE message_deliveries
+                    SET status='DELIVERED', attempts=attempts+1,
+                        consumer_id=?, lease_until=?, delivered_at=?
+                    WHERE delivery_id=? AND status='QUEUED'
+                    """,
+                    (consumer_id, lease_until, now_value, row["delivery_id"]),
+                ).rowcount
+                if updated != 1:
+                    continue
+                delivery = dict(row)
+                delivery.update(
+                    {
+                        "status": "DELIVERED",
+                        "attempts": int(row["attempts"] or 0) + 1,
+                        "consumer_id": consumer_id,
+                        "lease_until": lease_until,
+                        "envelope": envelope,
+                    }
+                )
+                claimed.append(delivery)
+                self._append_event(
+                    run_id, row["task_id"], envelope.get("attempt_id"),
+                    "message.delivered", "QUEUED", "DELIVERED",
+                    {"delivery_id": row["delivery_id"], "consumer_id": consumer_id},
+                )
+            self.connection.commit()
+            return claimed
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def acknowledge_message(
+        self,
+        delivery_id: str,
+        *,
+        controller: ControllerToken,
+        consumer_id: str,
+    ) -> str:
+        """Acknowledge one claimed delivery; duplicate ack is idempotent."""
+        if not consumer_id.strip():
+            raise ValueError("consumer_id must not be empty")
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                "SELECT * FROM message_deliveries WHERE delivery_id=?", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(delivery_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("message delivery belongs to another Run")
+            if row["status"] == "ACKNOWLEDGED":
+                self.connection.commit()
+                return "acknowledged"
+            if row["status"] != "DELIVERED" or row["consumer_id"] != consumer_id:
+                raise FencedAttemptError("message delivery is not owned by consumer")
+            self.connection.execute(
+                """
+                UPDATE message_deliveries
+                SET status='ACKNOWLEDGED', acknowledged_at=?, lease_until=NULL
+                WHERE delivery_id=? AND status='DELIVERED' AND consumer_id=?
+                """,
+                (now, delivery_id, consumer_id),
+            )
+            self._append_event(
+                row["run_id"], row["task_id"], None, "message.acknowledged",
+                "DELIVERED", "ACKNOWLEDGED", {"delivery_id": delivery_id, "consumer_id": consumer_id},
+            )
+            self.connection.commit()
+            return "acknowledged"
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def fail_message_delivery(
+        self,
+        delivery_id: str,
+        *,
+        controller: ControllerToken,
+        consumer_id: str,
+        reason: str,
+        retry_delay_seconds: int = 1,
+    ) -> str:
+        """Return a failed delivery to the queue, or move it to dead letter."""
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must not be negative")
+        now_dt = self._aware_datetime(None)
+        now = now_dt.isoformat()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            row = self.connection.execute(
+                "SELECT * FROM message_deliveries WHERE delivery_id=?", (delivery_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(delivery_id)
+            if row["run_id"] != controller.run_id:
+                raise FencedControllerError("message delivery belongs to another Run")
+            if row["status"] == "ACKNOWLEDGED":
+                self.connection.commit()
+                return "acknowledged"
+            if row["status"] != "DELIVERED" or row["consumer_id"] != consumer_id:
+                raise FencedAttemptError("message delivery is not owned by consumer")
+            attempts = int(row["attempts"] or 0)
+            terminal = attempts >= self.MAX_MESSAGE_ATTEMPTS
+            if terminal:
+                status, available = "FAILED", now
+            else:
+                status = "QUEUED"
+                available = (now_dt + timedelta(seconds=retry_delay_seconds)).isoformat()
+            self.connection.execute(
+                """
+                UPDATE message_deliveries
+                SET status=?, available_at=?, failed_at=?, consumer_id=NULL,
+                    lease_until=NULL, last_error=?
+                WHERE delivery_id=? AND status='DELIVERED' AND consumer_id=?
+                """,
+                (status, available, now, reason[:500], delivery_id, consumer_id),
+            )
+            self._append_event(
+                row["run_id"], row["task_id"], None,
+                "message.dead_letter" if terminal else "message.retry_scheduled",
+                "DELIVERED", status,
+                {"delivery_id": delivery_id, "attempts": attempts, "reason": reason[:500]},
+            )
+            self.connection.commit()
+            return status.lower()
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def events(self, *, task_id: str | None = None) -> list[dict[str, Any]]:
         if task_id is None:
@@ -6597,6 +7231,8 @@ class SQLiteStateStore:
             self._migrate_to_v18()
         if version < 19:
             self._migrate_to_v19()
+        if version < 20:
+            self._migrate_to_v20()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -7335,6 +7971,101 @@ class SQLiteStateStore:
                 PRAGMA user_version=19;
                 """
             )
+
+    def _migrate_to_v20(self) -> None:
+        """Add durable per-recipient delivery state for protocol messages."""
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS message_deliveries (
+                    delivery_id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL REFERENCES messages(message_id),
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    recipient_type TEXT NOT NULL,
+                    recipient_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'QUEUED', 'DELIVERED', 'ACKNOWLEDGED', 'FAILED', 'EXPIRED'
+                    )),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    consumer_id TEXT,
+                    available_at TEXT NOT NULL,
+                    lease_until TEXT,
+                    delivered_at TEXT,
+                    acknowledged_at TEXT,
+                    failed_at TEXT,
+                    expires_at TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(message_id, recipient_type, recipient_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_message_deliveries_claim
+                    ON message_deliveries(run_id, status, available_at, created_at);
+                CREATE INDEX IF NOT EXISTS idx_message_deliveries_message
+                    ON message_deliveries(message_id, recipient_id);
+                CREATE TABLE IF NOT EXISTS progress_heartbeats (
+                    heartbeat_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    generation INTEGER NOT NULL,
+                    phase TEXT NOT NULL,
+                    progress_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_progress_heartbeats_attempt
+                    ON progress_heartbeats(attempt_id, observed_at);
+                CREATE TABLE IF NOT EXISTS budget_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    generation INTEGER NOT NULL,
+                    call_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK(status IN ('RESERVED', 'SETTLED', 'RELEASED')),
+                    reserved_at TEXT NOT NULL,
+                    settled_at TEXT,
+                    released_at TEXT,
+                    UNIQUE(attempt_id, generation)
+                );
+                CREATE INDEX IF NOT EXISTS idx_budget_reservations_run
+                    ON budget_reservations(run_id, status, reserved_at);
+                PRAGMA user_version=20;
+                """
+            )
+            # 迁移旧 messages 时补建投递行，避免升级后历史协议消息变成
+            # 只有审计、没有可恢复状态的“黑洞”。无法解析的旧扩展消息仍
+            # 保留在 messages，不阻塞整个数据库升级。
+            for row in self.connection.execute(
+                "SELECT message_id, run_id, task_id, envelope_json, created_at "
+                "FROM messages"
+            ).fetchall():
+                try:
+                    envelope = json.loads(str(row["envelope_json"]))
+                    recipients = envelope.get("recipients") or []
+                    for recipient in recipients:
+                        self.connection.execute(
+                            """
+                            INSERT OR IGNORE INTO message_deliveries(
+                                delivery_id, message_id, run_id, task_id,
+                                recipient_type, recipient_id, status, attempts,
+                                available_at, expires_at, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, 'QUEUED', 0, ?, ?, ?)
+                            """,
+                            (
+                                f"delivery-{uuid.uuid4().hex[:16]}",
+                                row["message_id"],
+                                row["run_id"],
+                                row["task_id"],
+                                str(recipient.get("type") or "agent"),
+                                str(recipient["id"]),
+                                row["created_at"],
+                                envelope.get("expires_at"),
+                                row["created_at"],
+                            ),
+                        )
+                except (TypeError, KeyError, ValueError, json.JSONDecodeError):
+                    continue
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(
