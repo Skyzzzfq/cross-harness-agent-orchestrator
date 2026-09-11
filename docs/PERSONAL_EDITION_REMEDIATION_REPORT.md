@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1、R2、R3、R4、R5 已完成；R6 对话工作台切片已完成并保持 `stage3: checkpoint`，R7–R8 尚未开始。**
+状态：**R0、R1、R2、R3、R4、R5 已完成；R6 对话工作台切片和 R7 恢复/文档已完成；R8 已建立真实验收门禁并保持 `checkpoint`。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -311,4 +311,48 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 
 ## 5. 下一步
 
-R7 已提交；下一切片是 R8：固定小型样例项目，执行真实主管 + 双 Worker、独立审核/返工、重启/取消、引导和预算上限验收。Fake 或 API 单测不能替代真实端到端证据。
+R8 已建立固定的证据契约和只读验收门禁；下一步是在可用账号环境中固定样例项目并补齐 A--J 真实记录。Fake 或 API 单测不能替代真实端到端证据。
+
+## R8：真实端到端验收门禁（checkpoint）
+
+更新时间：2026-09-11
+状态：**checkpoint。验收逻辑已实现，但当前账号环境的 CodeBuddy 实时探针返回 `interactive-login-required`，尚未产生可复核的 R8 双后端证据。**
+
+### 1. 已实现
+
+- 新增 `scripts/personal_r8_acceptance.py`，冻结个人版样例标识 `personal-r8-fixed-sample-v1`、A--J 场景和最低重复次数；只读取证据，不启动模型、不修改 checkout、不执行删除或合并。
+- 旧 `.agent-hub/reports/stage3-real.json` 只能作为历史 E2 参考。即使历史报告为 20/20，缺少主管汇总、独立审核/返工、重启/取消、运行中引导、预算和单 Agent 对照时仍输出 `CHECKPOINT`。
+- 证据报告自动移除可能的 API key、token、密码、cookie 等字段；R8 只有 A--J 全部 PASS、双真实后端和固定样例契约齐全时才输出 `COMPLETE`。
+
+### 2. 当前核验结果
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| Codex 本地 SDK/保存登录探针 | PASS（只读） | `orchestrator probe`：SDK 可用、saved login present |
+| CodeBuddy 本地 SDK 探针 | PASS（能力可导入） | `orchestrator probe`：SDK/CLI 可用，登录未确认 |
+| CodeBuddy 实时登录探针 | **阻塞** | `orchestrator probe --live codebuddy`：`interactive-login-required` |
+| 历史 20 场景报告 | 历史参考 | `.agent-hub/reports/stage3-real.json`：20/20，但不满足 R8 A--J 契约 |
+| R8 门禁回归 | PASS | `tests/test_personal_r8.py`：5 项通过 |
+| R8 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；345 项，344 通过、1 跳过 |
+| 当前 R8 总状态 | **CHECKPOINT** | `scripts/personal_r8_acceptance.py` 输出 `.agent-hub/reports/personal-r8.json` |
+
+### 3. R8 门禁用法
+
+先做不调用模型的历史核验：
+
+```powershell
+& '.venv\\Scripts\\python.exe' scripts\\personal_r8_acceptance.py
+```
+
+真实验收后，使用符合 `personal-r8-v1` 的证据文件重新核验：
+
+```powershell
+& '.venv\\Scripts\\python.exe' scripts\\personal_r8_acceptance.py `
+  --evidence .agent-hub\\reports\\personal-r8-evidence.json
+```
+
+报告中的 Token/订阅金额如果不可得，必须在 J 的 `usage_disclosure` 中披露未知；不能把未知当成零消耗，也不能声称成本或速度优势。A、B、D 至少重复 3 次，失败记录必须保留。
+
+### 4. 未完成与下一步
+
+R8 仍缺真实主管 + 双 Worker 的一次输入闭环、真实并行重叠、独立 Reviewer 发现缺陷并返工、重启/取消不重复副作用、运行中引导的实际生效时机、预算封顶和单 Agent 对照。CodeBuddy 重新登录后，应先固定一个小型样例项目，再按 A--J 逐项记录证据并运行门禁；任何 FAIL 都保留 checkpoint，不得直接使用 `stage3: complete`。
