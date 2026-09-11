@@ -35,6 +35,8 @@ REQUIRED_REAL_CHECKS = frozenset(
     {
         "codex_plan_valid",
         "codex_chatgpt_auth",
+        "supervisor_summary_valid",
+        "independent_reviewer_session",
         "real_workers_overlapped",
         "codebuddy_sessions_distinct",
         "worker_commits_share_base",
@@ -94,6 +96,23 @@ REVIEW_SCHEMA = {
     "additionalProperties": False,
 }
 
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "result_refs": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+                "type": "string",
+                "enum": ["worker-a-attempt-1", "worker-b-attempt-2"],
+            },
+        },
+    },
+    "required": ["summary", "result_refs"],
+    "additionalProperties": False,
+}
+
 
 def _json_response(response: str | None) -> dict[str, Any]:
     if not response:
@@ -128,7 +147,7 @@ def _redact_credentials(value: Any) -> tuple[Any, int]:
     if not isinstance(value, str):
         return value, 0
     patterns = (
-        r"sk-[A-Za-z0-9_-]{20,}",
+        r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}",
         r"Bearer\s+[A-Za-z0-9._-]{20,}",
         r"Authorization[\"']?\s*[:=]\s*[\"'][^\"']{16,}",
     )
@@ -144,7 +163,9 @@ def _redact_credentials(value: Any) -> tuple[Any, int]:
 
 def _artifact_credentials_found(paths: tuple[Path, ...]) -> bool:
     patterns = (
-        re.compile(rb"sk-[A-Za-z0-9_-]{20,}", flags=re.IGNORECASE),
+        re.compile(
+            rb"(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}", flags=re.IGNORECASE
+        ),
         re.compile(rb"Bearer\s+[A-Za-z0-9._-]{20,}", flags=re.IGNORECASE),
         re.compile(
             rb"Authorization[\"']?\s*[:=]\s*[\"'][^\"']{16,}",
@@ -234,10 +255,12 @@ async def _run_real_demo(cwd: Path, database_path: Path) -> dict[str, Any]:
     )
     checkout_before = fingerprint_checkout(cwd)
     thread_id: str | None = None
+    reviewer_thread_id: str | None = None
     evidence: dict[str, Any] = {
         "scenario_id": SCENARIO_ID,
         "run_id": run_id,
         "codex": {},
+        "reviewer": {},
         "workers": {},
         "reviews": {},
         "git": {},
@@ -323,6 +346,27 @@ async def _run_real_demo(cwd: Path, database_path: Path) -> dict[str, Any]:
                         else None
                     ),
                 }
+
+                reviewer_thread = await codex.thread_start(
+                    approval_mode=ApprovalMode.deny_all,
+                    cwd=str(repository),
+                    ephemeral=False,
+                    sandbox=Sandbox.read_only,
+                    base_instructions=(
+                        "You are the independent reviewer for this fixed acceptance run. "
+                        "Review only the immutable artifact details supplied in each prompt. "
+                        "Do not call tools or modify files."
+                    ),
+                )
+                reviewer_thread_id = reviewer_thread.id
+                evidence["reviewer"] = {
+                    "thread_id": reviewer_thread.id,
+                    "role": "independent-reviewer",
+                    "distinct_from_supervisor": reviewer_thread.id != thread.id,
+                }
+                checks["independent_reviewer_session"] = (
+                    reviewer_thread.id != thread.id
+                )
 
                 worker_a = manager.create_worktree("worker-a", base_commit)
                 worker_b = manager.create_worktree("worker-b-attempt-1", base_commit)
@@ -504,7 +548,8 @@ async def _run_real_demo(cwd: Path, database_path: Path) -> dict[str, Any]:
                             "CONTENT_MISMATCH. Do not call tools."
                         )
                         turn = await asyncio.wait_for(
-                            thread.run(prompt, output_schema=REVIEW_SCHEMA), timeout=90.0
+                            reviewer_thread.run(prompt, output_schema=REVIEW_SCHEMA),
+                            timeout=90.0,
                         )
                         decision = _json_response(turn.final_response)
                         return {
@@ -523,7 +568,8 @@ async def _run_real_demo(cwd: Path, database_path: Path) -> dict[str, Any]:
                             "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
                             "deterministic_match": deterministic_match,
                             "criteria_version": CRITERIA_VERSION,
-                            "reviewer_id": "codex-supervisor-reviewer",
+                            "reviewer_id": "codex-independent-reviewer",
+                            "reviewer_session_id": reviewer_thread.id,
                             "prompt_sha256": _hash_text(prompt),
                         }
 
@@ -751,10 +797,54 @@ async def _run_real_demo(cwd: Path, database_path: Path) -> dict[str, Any]:
                         },
                     }
                     evidence["state_summary"] = store.summary(run_id=run_id)
+
+                    summary_prompt = (
+                        "You are the supervisor completing the fixed real acceptance run. "
+                        "Return a concise final summary after both tasks were integrated. "
+                        "The result_refs array must contain exactly these two identifiers: "
+                        "worker-a-attempt-1 and worker-b-attempt-2. Mention that both "
+                        "accepted results were integrated and the rejected first attempt "
+                        "was not integrated. Do not call tools."
+                    )
+                    summary_turn = await asyncio.wait_for(
+                        thread.run(summary_prompt, output_schema=SUMMARY_SCHEMA),
+                        timeout=90.0,
+                    )
+                    supervisor_summary = _json_response(summary_turn.final_response)
+                    summary_refs = supervisor_summary.get("result_refs")
+                    expected_summary_refs = {
+                        "worker-a-attempt-1",
+                        "worker-b-attempt-2",
+                    }
+                    checks["supervisor_summary_valid"] = (
+                        isinstance(summary_refs, list)
+                        and set(summary_refs) == expected_summary_refs
+                    )
+                    if not checks["supervisor_summary_valid"]:
+                        raise ValueError(
+                            "Codex supervisor summary did not reference both accepted worker results"
+                        )
+                    evidence["supervisor_summary"] = {
+                        "turn_id": summary_turn.id,
+                        "status": summary_turn.status.value,
+                        "duration_ms": summary_turn.duration_ms,
+                        "usage": (
+                            summary_turn.usage.model_dump(by_alias=True)
+                            if summary_turn.usage
+                            else None
+                        ),
+                        "result_refs": summary_refs,
+                        "summary": supervisor_summary.get("summary"),
+                        "prompt_sha256": _hash_text(summary_prompt),
+                    }
             finally:
                 if thread_id:
                     await asyncio.wait_for(
                         codex.thread_archive(thread_id), timeout=20.0
+                    )
+                if reviewer_thread_id:
+                    await asyncio.wait_for(
+                        codex.thread_archive(reviewer_thread_id), timeout=20.0
                     )
     except Exception as exc:
         failure = {"error_type": type(exc).__name__, "message": str(exc)}

@@ -10,6 +10,7 @@ from scripts.personal_r8_acceptance import (
     SAMPLE_ID,
     evaluate_evidence,
 )
+from orchestrator.poc.real_demo import _redact_credentials
 from scripts.personal_r8_real_evidence import build_evidence
 
 
@@ -142,6 +143,13 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
         self.assertNotIn("sk-not-for-output", serialized)
         self.assertNotIn("secret-value", serialized)
         self.assertTrue(report["redacted_fields"])
+
+    def test_credential_scanner_does_not_match_task_ids(self) -> None:
+        value, redactions = _redact_credentials(
+            {"task_id": "task-real-12345678901234567890"}
+        )
+        self.assertEqual(redactions, 0)
+        self.assertEqual(value["task_id"], "task-real-12345678901234567890")
 
     def test_missing_repetition_is_pending_not_pass(self) -> None:
         evidence = complete_evidence()
