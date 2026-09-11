@@ -143,7 +143,7 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 
 
 class SQLiteStateStore:
@@ -277,6 +277,348 @@ class SQLiteStateStore:
                 ),
             )
         return str(entry["artifact_id"])
+
+    def list_handoffs(
+        self, run_id: str, *, task_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM handoffs WHERE run_id = ?"
+        args: list[Any] = [run_id]
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            args.append(task_id)
+        sql += " ORDER BY created_at, handoff_id"
+        return [dict(row) for row in self.connection.execute(sql, args).fetchall()]
+
+    def get_handoff(self, task_id: str, attempt_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM handoffs WHERE task_id = ? AND attempt_id = ?",
+            (task_id, attempt_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"handoff:{task_id}:{attempt_id}")
+        result = dict(row)
+        result["package"] = json.loads(str(result["package_json"]))
+        return result
+
+    def list_task_results(
+        self, run_id: str, *, task_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM task_results WHERE run_id = ?"
+        args: list[Any] = [run_id]
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            args.append(task_id)
+        sql += " ORDER BY created_at, result_id"
+        rows = self.connection.execute(sql, args).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["result"] = json.loads(str(item["result_json"]))
+            item["artifact_refs"] = json.loads(str(item["artifact_refs_json"]))
+            results.append(item)
+        return results
+
+    def _candidate_commit_exists_tx(self, workspace_path: str | None, commit: str) -> bool:
+        if not commit.strip():
+            return False
+        if workspace_path:
+            try:
+                from orchestrator.workspace.git_manager import _git
+
+                return (
+                    _git(
+                        Path(workspace_path),
+                        "cat-file",
+                        "-e",
+                        f"{commit}^{{commit}}",
+                        check=False,
+                    ).returncode
+                    == 0
+                )
+            except (OSError, RuntimeError):
+                return False
+        return False
+
+    def record_worker_result(
+        self,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        result: Mapping[str, Any],
+        *,
+        verified: bool = False,
+        verified_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Record one fenced, structured result without granting completion by text."""
+        from orchestrator.core.handoff import result_digest, validate_result_payload
+
+        if not isinstance(result, Mapping):
+            raise ValueError("worker result must be a structured object")
+        if verified:
+            raise ValueError("worker results cannot self-verify; call verify_worker_result")
+        payload = validate_result_payload(
+            result, run_id=run_id, task_id=task_id, attempt_id=attempt_id
+        )
+        candidate_commit = payload.get("candidate_commit")
+        if candidate_commit is not None and not isinstance(candidate_commit, str):
+            raise ValueError("candidate_commit must be a string or null")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                """
+                SELECT t.*, a.state AS attempt_state, a.workspace_path,
+                       a.generation, a.result_json AS attempt_result_json
+                FROM tasks t JOIN attempts a ON a.task_id = t.task_id
+                WHERE t.run_id = ? AND t.task_id = ? AND a.attempt_id = ?
+                """,
+                (run_id, task_id, attempt_id),
+            ).fetchone()
+            if row is None:
+                raise FencedAttemptError("result references an unknown task attempt")
+            if row["attempt_state"] not in {
+                AttemptState.ASSIGNED.value,
+                AttemptState.RUNNING.value,
+                AttemptState.SUBMITTED.value,
+            }:
+                raise FencedAttemptError("closed or stale attempt cannot publish a result")
+            if str(row["access_mode"]) == "write" and payload["status"] == "completed":
+                if not candidate_commit:
+                    raise ValueError("completed write result must reference candidate_commit")
+                if not self._candidate_commit_exists_tx(row["workspace_path"], candidate_commit):
+                    raise ValueError("candidate_commit does not exist in the attempt repository")
+            raw_refs = payload.get("artifact_refs", ())
+            normalized_refs: list[str] = []
+            for ref in raw_refs:
+                artifact_id = (
+                    str(ref.get("artifact_id"))
+                    if isinstance(ref, Mapping) and ref.get("artifact_id")
+                    else str(ref)
+                )
+                if not artifact_id.strip():
+                    raise ValueError("artifact_refs cannot contain an empty reference")
+                artifact = self.connection.execute(
+                    """
+                    SELECT candidate_commit FROM artifacts
+                    WHERE artifact_id = ? AND run_id = ? AND task_id = ? AND attempt_id = ?
+                    """,
+                    (artifact_id, run_id, task_id, attempt_id),
+                ).fetchone()
+                if artifact is None:
+                    raise ValueError(f"artifact reference is not owned by this attempt: {artifact_id}")
+                if candidate_commit and artifact["candidate_commit"] not in {
+                    None, candidate_commit
+                }:
+                    raise ValueError("artifact reference candidate_commit does not match result")
+                normalized_refs.append(artifact_id)
+            payload["artifact_refs"] = normalized_refs
+            # A supervisor may cite child results, but every cited result must
+            # belong to a direct child.  This prevents a model from inventing
+            # completion on behalf of another Worker.
+            child_refs = payload.get("child_result_refs", ())
+            if child_refs is not None and not isinstance(child_refs, (list, tuple)):
+                raise ValueError("child_result_refs must be an array")
+            if child_refs:
+                for child_ref in child_refs:
+                    child_id = str(child_ref)
+                    child = self.connection.execute(
+                        """
+                        SELECT r.result_id
+                        FROM task_results r JOIN tasks child ON child.task_id = r.task_id
+                        WHERE r.result_id = ? AND r.run_id = ?
+                          AND r.status = 'verified' AND child.parent_task_id = ?
+                        """,
+                        (child_id, run_id, task_id),
+                    ).fetchone()
+                    if child is None:
+                        raise ValueError(f"child result is not a verified direct child: {child_id}")
+                payload["child_result_refs"] = [str(item) for item in child_refs]
+            digest = result_digest(payload)
+            stored_status = {
+                "completed": "submitted",
+                "failed": "blocked",
+                "needs_input": "needs_input",
+                "blocked": "blocked",
+            }[payload["status"]]
+            existing = self.connection.execute(
+                "SELECT * FROM task_results WHERE attempt_id = ? AND result_digest = ?",
+                (attempt_id, digest),
+            ).fetchone()
+            if existing is not None:
+                self.connection.commit()
+                return dict(existing)
+            now = utc_now()
+            result_id = f"result-{uuid.uuid4().hex[:16]}"
+            result_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            refs_json = json.dumps(normalized_refs, ensure_ascii=False, sort_keys=True)
+            self.connection.execute(
+                """
+                INSERT INTO task_results(
+                    result_id, run_id, task_id, attempt_id, status, result_json,
+                    result_digest, candidate_commit, artifact_refs_json,
+                    verified_by, created_at, verified_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result_id, run_id, task_id, attempt_id, stored_status,
+                    result_json, digest, candidate_commit, refs_json,
+                    None, now, None,
+                ),
+            )
+            self.connection.execute(
+                """
+                UPDATE attempts SET result_json = ?, candidate_commit = ?,
+                    artifact_refs_json = ?, claimed_checks_json = ?,
+                    remaining_issues_json = ?, updated_at = ?
+                WHERE attempt_id = ?
+                """,
+                (
+                    result_json, candidate_commit, refs_json,
+                    json.dumps(payload["claimed_checks"], ensure_ascii=False),
+                    json.dumps(payload["remaining_issues"], ensure_ascii=False),
+                    now, attempt_id,
+                ),
+            )
+            self._append_event(
+                run_id, task_id, attempt_id, "task.result.recorded",
+                row["state"], row["state"],
+                {
+                    "result_id": result_id,
+                    "status": stored_status,
+                    "result_digest": digest,
+                    "verified": False,
+                },
+            )
+            self.connection.commit()
+            return dict(
+                self.connection.execute(
+                    "SELECT * FROM task_results WHERE result_id = ?", (result_id,)
+                ).fetchone()
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def verify_worker_result(
+        self, result_id: str, *, verified_by: str = "hub"
+    ) -> dict[str, Any]:
+        if not verified_by.strip():
+            raise ValueError("verified_by must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            row = self.connection.execute(
+                "SELECT * FROM task_results WHERE result_id = ?", (result_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(result_id)
+            if row["status"] == "verified":
+                self.connection.commit()
+                return dict(row)
+            if row["status"] != "submitted":
+                raise ValueError(f"result {result_id} is {row['status']}, not submitted")
+            now = utc_now()
+            self.connection.execute(
+                """
+                UPDATE task_results SET status='verified', verified_by=?, verified_at=?
+                WHERE result_id=? AND status='submitted'
+                """,
+                (verified_by, now, result_id),
+            )
+            self._append_event(
+                row["run_id"], row["task_id"], row["attempt_id"],
+                "task.result.verified", "submitted", "verified",
+                {"result_id": result_id, "verified_by": verified_by},
+            )
+            self._reconcile_task_graph_tx(row["run_id"], now)
+            self.connection.commit()
+            return dict(
+                self.connection.execute(
+                    "SELECT * FROM task_results WHERE result_id = ?", (result_id,)
+                ).fetchone()
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def aggregate_parent_task(
+        self, run_id: str, parent_task_id: str, *, summary_result_id: str | None = None
+    ) -> dict[str, Any]:
+        """Complete a parent only after every required child and its summary are verified."""
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            parent = self.connection.execute(
+                "SELECT * FROM tasks WHERE run_id = ? AND task_id = ?",
+                (run_id, parent_task_id),
+            ).fetchone()
+            if parent is None:
+                raise KeyError(parent_task_id)
+            children = self.connection.execute(
+                "SELECT task_id, required_delivery, state FROM tasks "
+                "WHERE run_id = ? AND parent_task_id = ? ORDER BY created_at, task_id",
+                (run_id, parent_task_id),
+            ).fetchall()
+            required = [child for child in children if int(child["required_delivery"])]
+            verified: dict[str, sqlite3.Row] = {}
+            for child in required:
+                result = self.connection.execute(
+                    """
+                    SELECT * FROM task_results
+                    WHERE run_id = ? AND task_id = ? AND status = 'verified'
+                    ORDER BY verified_at DESC, created_at DESC LIMIT 1
+                    """,
+                    (run_id, child["task_id"]),
+                ).fetchone()
+                if result is not None:
+                    verified[str(child["task_id"])] = result
+            summary = None
+            if summary_result_id:
+                summary = self.connection.execute(
+                    """SELECT * FROM task_results WHERE result_id = ?
+                       AND run_id = ? AND task_id = ? AND status = 'verified'""",
+                    (summary_result_id, run_id, parent_task_id),
+                ).fetchone()
+            child_ids = [str(child["task_id"]) for child in required]
+            delivered = len(verified) == len(required)
+            summary_refs: set[str] = set()
+            if summary is not None:
+                summary_payload = json.loads(str(summary["result_json"]))
+                summary_refs = {str(ref) for ref in summary_payload.get("child_result_refs", ())}
+            required_result_ids = {str(verified[item]["result_id"]) for item in child_ids}
+            summary_complete = summary is not None and required_result_ids <= summary_refs
+            completed = False
+            if delivered and summary_complete and TaskState(parent["state"]) == TaskState.REVIEW:
+                self._transition_task_tx(
+                    parent_task_id, TaskState.COMPLETED,
+                    "verified-child-results-aggregated", utc_now()
+                )
+                completed = True
+            self._append_event(
+                run_id, parent_task_id, None, "parent.aggregation.checked",
+                parent["state"], parent["state"],
+                {
+                    "required_children": child_ids,
+                    "delivered_children": sorted(verified),
+                    "optional_failures_disclosed": [
+                        str(child["task_id"])
+                        for child in children
+                        if not int(child["required_delivery"])
+                        and child["state"] in {TaskState.FAILED.value, TaskState.CANCELLED.value}
+                    ],
+                    "summary_result_id": summary_result_id,
+                    "completed": completed,
+                },
+            )
+            self.connection.commit()
+            return {
+                "run_id": run_id,
+                "parent_task_id": parent_task_id,
+                "required_children": child_ids,
+                "delivered_children": sorted(verified),
+                "completed": completed,
+                "summary_complete": summary_complete,
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def save_supervisor_plan(
         self,
@@ -686,6 +1028,16 @@ class SQLiteStateStore:
                         "priority": 0,
                         "retry_backoff_base_seconds": 1,
                         "retry_backoff_max_seconds": 60,
+                        "parent_task_id": supervisor_task_id,
+                        "dispatch_source": "supervisor_plan",
+                        "required_delivery": True,
+                        "task_kind": getattr(task, "task_kind", "implementation"),
+                        "acceptance_criteria": tuple(
+                            getattr(task, "acceptance_criteria", ())
+                        ),
+                        "input_refs": tuple(getattr(task, "input_refs", ())),
+                        "output_contract": getattr(task, "output_contract", None),
+                        "budget": getattr(task, "budget", None),
                     }
                 )
 
@@ -1452,7 +1804,7 @@ class SQLiteStateStore:
                 self.connection.commit()
                 return None
             run_snapshot_row = self.connection.execute(
-                "SELECT team_snapshot_json FROM runs WHERE run_id=?", (run_id,)
+                "SELECT team_id, team_snapshot_json FROM runs WHERE run_id=?", (run_id,)
             ).fetchone()
             workspace_enabled = (
                 self.workspace_manager is not None
@@ -1462,7 +1814,11 @@ class SQLiteStateStore:
             candidates = self.connection.execute(
                 """
                 SELECT t.task_id, t.run_id, t.access_mode, t.write_scope_json,
-                       t.max_attempts, d.required_role_id, d.required_model,
+                       t.max_attempts, t.parent_task_id, t.dispatch_source,
+                       t.required_delivery, t.task_kind,
+                       t.acceptance_criteria_json, t.input_refs_json,
+                       t.output_contract_json, t.budget_json,
+                       d.required_role_id, d.required_model,
                        d.required_provider_id,
                        d.instruction_text,
                        d.cwd, d.timeout_seconds,
@@ -1568,6 +1924,75 @@ class SQLiteStateStore:
                 scratch_path = str(allocation["scratch_path"])
                 base_commit = str(allocation["base_commit"])
                 workspace_path = str(allocation["workspace_path"])
+            from orchestrator.core.handoff import HandoffPackage, render_handoff_prompt
+
+            plan_revision_row = self.connection.execute(
+                """
+                SELECT COALESCE(MAX(revision), 1) AS revision
+                FROM supervisor_plans
+                WHERE run_id = ? AND supervisor_task_id = ?
+                """,
+                (run_id, row["parent_task_id"] or row["task_id"]),
+            ).fetchone()
+            dependency_refs = [
+                dict(item)
+                for item in self.connection.execute(
+                    """
+                    SELECT d.depends_on_task_id AS task_id,
+                           r.result_id, r.candidate_commit, r.artifact_refs_json
+                    FROM task_dependencies d
+                    JOIN task_results r
+                      ON r.task_id = d.depends_on_task_id AND r.status = 'verified'
+                    WHERE d.run_id = ? AND d.task_id = ?
+                    ORDER BY r.created_at, r.result_id
+                    """,
+                    (run_id, row["task_id"]),
+                ).fetchall()
+            ]
+            input_refs = json.loads(row["input_refs_json"] or "[]")
+            if dependency_refs:
+                input_refs = list(input_refs) + [
+                    {"kind": "verified_task_result", **ref} for ref in dependency_refs
+                ]
+            handoff = HandoffPackage(
+                contract_version=1,
+                project_id=str(run_snapshot_row["team_id"]),
+                run_id=run_id,
+                task_id=str(row["task_id"]),
+                attempt_id=attempt_id,
+                plan_revision=int(plan_revision_row["revision"]),
+                goal=str(row["instruction_text"]),
+                accepted_facts=tuple(
+                    {"kind": "verified_dependency", "value": ref}
+                    for ref in dependency_refs
+                ),
+                constraints=(
+                    f"access_mode={row['access_mode']}",
+                    f"cwd={workspace_path}",
+                    f"write_scope={json.dumps(json.loads(row['write_scope_json']), ensure_ascii=False)}",
+                ),
+                input_refs=tuple(input_refs),
+                base_commit=base_commit,
+                write_scope=tuple(json.loads(row["write_scope_json"])),
+                acceptance_criteria=tuple(
+                    json.loads(row["acceptance_criteria_json"] or "[]")
+                ),
+                budget=json.loads(row["budget_json"])
+                if row["budget_json"]
+                else None,
+                expected_output=json.loads(row["output_contract_json"])
+                if row["output_contract_json"]
+                else None,
+                agent_id=str(row["agent_id"]),
+                role_id=str(row["required_role_id"]),
+                backend=str(row["backend"]),
+                model=row["model"],
+                provider_id=row["required_provider_id"] or row["provider_id"],
+                session_ref_id=str(row["session_ref_id"]),
+            )
+            handoff_json = json.dumps(
+                handoff.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
             request = AdapterCallRequest(
                 call_id=call_id,
                 run_id=run_id,
@@ -1582,7 +2007,7 @@ class SQLiteStateStore:
                     model=row["model"],
                     provider_id=row["required_provider_id"] or row["provider_id"],
                 ),
-                prompt=row["instruction_text"],
+                prompt=render_handoff_prompt(row["instruction_text"], handoff),
                 policy=AccessPolicy(
                     access_mode=row["access_mode"],
                     cwd=workspace_path,
@@ -1609,6 +2034,25 @@ class SQLiteStateStore:
                     base_commit,
                     now_value,
                     now_value,
+                ),
+            )
+            self.connection.execute(
+                """
+                UPDATE attempts SET handoff_digest = ? WHERE attempt_id = ?
+                """,
+                (handoff.digest, attempt_id),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO handoffs(
+                    handoff_id, run_id, task_id, attempt_id, plan_revision,
+                    package_json, package_digest, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"handoff-{uuid.uuid4().hex[:16]}", run_id, row["task_id"],
+                    attempt_id, int(plan_revision_row["revision"]), handoff_json,
+                    handoff.digest, now_value,
                 ),
             )
             self.connection.execute(
@@ -1693,6 +2137,8 @@ class SQLiteStateStore:
                     "workspace_path": workspace_path,
                     "scratch_path": scratch_path,
                     "base_commit": base_commit,
+                    "handoff_digest": handoff.digest,
+                    "dispatch_source": row["dispatch_source"],
                 },
             )
             self.connection.commit()
@@ -1842,6 +2288,7 @@ class SQLiteStateStore:
                 self._transition_task_tx(
                     task_id, TaskState.CANCELLED, reason, now
                 )
+                self._cancel_descendants_tx(run_id, task_id, reason, now)
                 self._reconcile_task_graph_tx(run_id, now)
                 self.connection.commit()
                 return "cancelled"
@@ -1850,6 +2297,7 @@ class SQLiteStateStore:
                     task_id, TaskState.CANCEL_REQUESTED, reason, now
                 )
                 self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+                self._cancel_descendants_tx(run_id, task_id, reason, now)
                 self._reconcile_task_graph_tx(run_id, now)
                 self.connection.commit()
                 return "cancelled"
@@ -1858,6 +2306,7 @@ class SQLiteStateStore:
                     task_id, TaskState.CANCEL_REQUESTED, reason, now
                 )
                 self._transition_task_tx(task_id, TaskState.CANCELLED, reason, now)
+                self._cancel_descendants_tx(run_id, task_id, reason, now)
                 self._reconcile_task_graph_tx(run_id, now)
                 self.connection.commit()
                 return "cancelled"
@@ -1865,6 +2314,7 @@ class SQLiteStateStore:
                 disposition = self._request_cancel_active_task_tx(
                     run_id, task_id, reason, now
                 )
+                self._cancel_descendants_tx(run_id, task_id, reason, now)
                 self.connection.commit()
                 return disposition
             self.connection.commit()
@@ -1872,6 +2322,26 @@ class SQLiteStateStore:
         except BaseException:
             self.connection.rollback()
             raise
+
+    def _cancel_descendants_tx(
+        self, run_id: str, parent_task_id: str, reason: str, now: str
+    ) -> None:
+        rows = self.connection.execute(
+            """
+            WITH RECURSIVE descendants(task_id) AS (
+                SELECT task_id FROM tasks
+                WHERE run_id = ? AND parent_task_id = ?
+                UNION ALL
+                SELECT t.task_id FROM tasks t
+                JOIN descendants d ON d.task_id = t.parent_task_id
+                WHERE t.run_id = ?
+            )
+            SELECT task_id FROM descendants ORDER BY task_id
+            """,
+            (run_id, parent_task_id, run_id),
+        ).fetchall()
+        for row in rows:
+            self._cancel_task_in_tx(run_id, str(row["task_id"]), reason, now)
 
     def request_cancel_run(
         self, run_id: str, controller: ControllerToken, *, reason: str
@@ -4588,6 +5058,14 @@ class SQLiteStateStore:
         priority: int = 0,
         retry_backoff_base_seconds: int = 1,
         retry_backoff_max_seconds: int = 60,
+        parent_task_id: str | None = None,
+        dispatch_source: str = "user",
+        required_delivery: bool = True,
+        task_kind: str = "implementation",
+        acceptance_criteria: tuple[str, ...] = (),
+        input_refs: tuple[Any, ...] = (),
+        output_contract: Any = None,
+        budget: Any = None,
     ) -> None:
         self._validate_task_spec(
             task_id=task_id,
@@ -4635,6 +5113,14 @@ class SQLiteStateStore:
                 priority=priority,
                 retry_backoff_base_seconds=retry_backoff_base_seconds,
                 retry_backoff_max_seconds=retry_backoff_max_seconds,
+                parent_task_id=parent_task_id,
+                dispatch_source=dispatch_source,
+                required_delivery=required_delivery,
+                task_kind=task_kind,
+                acceptance_criteria=acceptance_criteria,
+                input_refs=input_refs,
+                output_contract=output_contract,
+                budget=budget,
                 now=now,
             )
 
@@ -4661,6 +5147,14 @@ class SQLiteStateStore:
             "priority",
             "retry_backoff_base_seconds",
             "retry_backoff_max_seconds",
+            "parent_task_id",
+            "dispatch_source",
+            "required_delivery",
+            "task_kind",
+            "acceptance_criteria",
+            "input_refs",
+            "output_contract",
+            "budget",
         }
         normalized: list[dict[str, Any]] = []
         task_ids: set[str] = set()
@@ -4691,6 +5185,14 @@ class SQLiteStateStore:
                 "retry_backoff_max_seconds": int(
                     raw.get("retry_backoff_max_seconds", 60)
                 ),
+                "parent_task_id": raw.get("parent_task_id"),
+                "dispatch_source": str(raw.get("dispatch_source", "user")),
+                "required_delivery": bool(raw.get("required_delivery", True)),
+                "task_kind": str(raw.get("task_kind", "implementation")),
+                "acceptance_criteria": tuple(raw.get("acceptance_criteria", ())),
+                "input_refs": tuple(raw.get("input_refs", ())),
+                "output_contract": raw.get("output_contract"),
+                "budget": raw.get("budget"),
             }
             self._validate_task_spec(
                 task_id=spec["task_id"],
@@ -4861,13 +5363,35 @@ class SQLiteStateStore:
         retry_backoff_base_seconds: int,
         retry_backoff_max_seconds: int,
         now: str,
+        parent_task_id: str | None = None,
+        dispatch_source: str = "user",
+        required_delivery: bool = True,
+        task_kind: str = "implementation",
+        acceptance_criteria: tuple[str, ...] = (),
+        input_refs: tuple[Any, ...] = (),
+        output_contract: Any = None,
+        budget: Any = None,
     ) -> None:
+        if not dispatch_source.strip():
+            raise ValueError("dispatch_source must not be empty")
+        if not task_kind.strip():
+            raise ValueError("task_kind must not be empty")
+        if any(not isinstance(item, str) or not item.strip() for item in acceptance_criteria):
+            raise ValueError("acceptance_criteria must contain non-empty strings")
+        if parent_task_id is not None:
+            parent = self.connection.execute(
+                "SELECT run_id FROM tasks WHERE task_id = ?", (parent_task_id,)
+            ).fetchone()
+            if parent is None or str(parent["run_id"]) != run_id:
+                raise ValueError("parent_task_id must belong to the same Run")
         self.connection.execute(
             """
             INSERT INTO tasks(
                 task_id, run_id, state, access_mode, write_scope_json,
-                max_attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                max_attempts, parent_task_id, dispatch_source, required_delivery,
+                task_kind, acceptance_criteria_json, input_refs_json,
+                output_contract_json, budget_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -4876,6 +5400,18 @@ class SQLiteStateStore:
                 access_mode,
                 json.dumps(write_scope),
                 max_attempts,
+                parent_task_id,
+                dispatch_source,
+                int(required_delivery),
+                task_kind,
+                json.dumps(list(acceptance_criteria), ensure_ascii=False),
+                json.dumps(list(input_refs), ensure_ascii=False, sort_keys=True),
+                None if output_contract is None else json.dumps(
+                    output_contract, ensure_ascii=False, sort_keys=True
+                ),
+                None if budget is None else json.dumps(
+                    budget, ensure_ascii=False, sort_keys=True
+                ),
                 now,
                 now,
             ),
@@ -4917,6 +5453,8 @@ class SQLiteStateStore:
                 "write_scope": write_scope,
                 "max_attempts": max_attempts,
                 "required_role_id": required_role_id,
+                "parent_task_id": parent_task_id,
+                "dispatch_source": dispatch_source,
             },
         )
 
@@ -5021,6 +5559,11 @@ class SQLiteStateStore:
                       JOIN tasks upstream ON upstream.task_id = d.depends_on_task_id
                       WHERE d.run_id = t.run_id AND d.task_id = t.task_id
                         AND upstream.state <> 'COMPLETED'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM task_results verified
+                            WHERE verified.task_id = upstream.task_id
+                              AND verified.status = 'verified'
+                        )
                   )
                 ORDER BY t.created_at, t.task_id
                 """,
@@ -5075,6 +5618,11 @@ class SQLiteStateStore:
                     JOIN tasks upstream ON upstream.task_id = d.depends_on_task_id
                     WHERE d.run_id = ? AND d.task_id = ?
                       AND upstream.state <> 'COMPLETED'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM task_results verified
+                          WHERE verified.task_id = upstream.task_id
+                            AND verified.status = 'verified'
+                      )
                     LIMIT 1
                     """,
                     (row["run_id"], task_id),
@@ -5842,6 +6390,8 @@ class SQLiteStateStore:
             self._migrate_to_v16()
         if version < 17:
             self._migrate_to_v17()
+        if version < 18:
+            self._migrate_to_v18()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -6474,6 +7024,80 @@ class SQLiteStateStore:
                 CREATE INDEX IF NOT EXISTS idx_artifacts_task
                     ON artifacts(run_id, task_id, attempt_id, version);
                 PRAGMA user_version=17;
+                """
+            )
+
+    def _migrate_to_v18(self) -> None:
+        """Persist Hub-owned handoffs, structured results, and task lineage."""
+        with self.connection:
+            task_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(tasks)")
+            }
+            for name, declaration in (
+                ("parent_task_id", "TEXT REFERENCES tasks(task_id)"),
+                ("dispatch_source", "TEXT NOT NULL DEFAULT 'user'"),
+                ("required_delivery", "INTEGER NOT NULL DEFAULT 1"),
+                ("task_kind", "TEXT NOT NULL DEFAULT 'implementation'"),
+                ("acceptance_criteria_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("input_refs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("output_contract_json", "TEXT"),
+                ("budget_json", "TEXT"),
+            ):
+                if name not in task_columns:
+                    self.connection.execute(
+                        f"ALTER TABLE tasks ADD COLUMN {name} {declaration}"
+                    )
+            attempt_columns = {
+                row["name"]
+                for row in self.connection.execute("PRAGMA table_info(attempts)")
+            }
+            for name, declaration in (
+                ("handoff_digest", "TEXT"),
+                ("result_json", "TEXT"),
+                ("candidate_commit", "TEXT"),
+                ("artifact_refs_json", "TEXT"),
+                ("claimed_checks_json", "TEXT"),
+                ("remaining_issues_json", "TEXT"),
+            ):
+                if name not in attempt_columns:
+                    self.connection.execute(
+                        f"ALTER TABLE attempts ADD COLUMN {name} {declaration}"
+                    )
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS handoffs (
+                    handoff_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    plan_revision INTEGER NOT NULL,
+                    package_json TEXT NOT NULL,
+                    package_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(task_id, attempt_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_handoffs_run
+                    ON handoffs(run_id, task_id, created_at);
+                CREATE TABLE IF NOT EXISTS task_results (
+                    result_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'submitted', 'verified', 'blocked', 'needs_input', 'rejected'
+                    )),
+                    result_json TEXT NOT NULL,
+                    result_digest TEXT NOT NULL,
+                    candidate_commit TEXT,
+                    artifact_refs_json TEXT NOT NULL,
+                    verified_by TEXT,
+                    created_at TEXT NOT NULL,
+                    verified_at TEXT,
+                    UNIQUE(attempt_id, result_digest)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_results_task
+                    ON task_results(run_id, task_id, created_at);
+                PRAGMA user_version=18;
                 """
             )
 

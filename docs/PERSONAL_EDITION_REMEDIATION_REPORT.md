@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1 已完成；整体整改保持 `stage3: checkpoint`，R2–R8 尚未开始。**
+状态：**R0、R1、R2、R3 已完成；整体整改保持 `stage3: checkpoint`，R4–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -168,6 +168,34 @@ Fake 主管可以生成 v2 计划、在人工批准前保持零 Worker 派发、
 
 新 Run 的写任务已经获得 task/attempt 级副本，实际提交前 scope 外变更会被拦截，主 checkout 指纹在分配副本时不变。合并执行器的现有串行 Git 交付仍作为兼容路径保留；真正把组合结果完全落到 Run 的 integration worktree、再按策略交付用户分支，留在后续 R3/R4 对账。真实 Codex/CodeBuddy 的权限探针和两 Worker 真实重叠写入仍需在可用登录态环境复测。
 
+## R3：移交、执行、结果回收与父任务聚合
+
+更新时间：2026-09-11
+状态：**R3 已完成（Fake/本地 Git 证据通过；真实 Codex/CodeBuddy 端到端汇总尚未重测）。**
+
+### 1. 已实现
+
+- `orchestrator/core/handoff.py` 定义版本化 `HandoffPackage` 和结构化 `WorkerResult` 校验；Hub 生成的包包含项目/Run/task/attempt、计划 revision、已验证输入引用、实际 cwd、base commit、write scope、验收项、预算、输出契约及 Agent/role/backend/model/provider/session 身份。
+- `claim_ready_dispatch` 在创建 attempt 的同一事务中写入 handoff、摘要和 digest，并把实际工作区和权限渲染给后端；模型提供的路径不会覆盖 Hub 分配的路径。依赖任务只注入已经验证的结果引用。
+- schema v18 新增任务父子关系、派发来源、交付要求、任务契约/预算、attempt 结果字段，以及 `handoffs`、`task_results` 表。控制台任务、handoffs、results 和 chat 资源可展示父子关系、派发来源和实际 Agent/session/backend/model/provider。
+- `record_worker_result` 拒绝纯文本、跨 task/attempt 引用、未归属 artifact、伪造 candidate commit 和旧/关闭 attempt；后端成功只有在显式包含 `status` 的结构化结果时才进入结果表，主管计划仍留在原有计划解析路径。
+- 结果经 Hub 验证后才释放依赖；父任务聚合要求全部必需子任务结果和主管 summary 的 child result 引用均为 verified，可选子任务失败会被披露。取消父任务会递归级联到子任务。
+
+### 2. R3 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| Hub-owned handoff、实际 attempt 路径和 digest | PASS | `tests/test_personal_r3.py::R3HandoffTests.test_claim_persists_hub_owned_handoff` |
+| 伪造跨任务结果拒绝、验证结果释放依赖 | PASS | `tests/test_personal_r3.py::R3HandoffTests.test_forged_result_rejected_and_verified_dependency_released` |
+| 父任务等待全部子结果和主管 summary 引用 | PASS | `tests/test_personal_r3.py::R3HandoffTests.test_parent_requires_all_children_and_summary_references` |
+| 旧 attempt 结果隔离、既有 fencing/恢复回归 | PASS | `tests/test_personal_r3.py`、既有 runtime/console 回归 |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；321 项，320 通过、1 跳过 |
+| 真实后端结构化结果和真实主管汇总 | **未验证** | 当前真实 Adapter 仍未声明 structured-output 能力；不能把 Fake 证据写成真实端到端成功。 |
+
+### 3. R3 出口与限制
+
+本地 Fake 场景已经能观察到 Hub 生成移交包、两个不同 task/attempt 的结果、已验证依赖释放和父任务引用汇总；重启/晚到结果通过 attempt 状态和 digest 拒绝旧写入。真实后端的结构化输出仍需在登录态可用时补一次小型实测，R4 再负责独立验证、返工和 Git 集成交付。因此整体仍是 `stage3: checkpoint`，不是个人版最终验收。
+
 ## 5. 下一步
 
-R2 已完成，下一切片是 R3：生成有版本和引用的任务移交包，绑定 Agent/会话/尝试，回收结构化结果并做父任务聚合。整体状态仍是 `stage3: checkpoint`，不是个人版最终验收。
+R3 已完成，下一切片是 R4：把 candidate/artifact 交给独立验证器，绑定审核证据和 commit，支持有限返工并串行集成。真实后端能力未验证项保持公开记录。

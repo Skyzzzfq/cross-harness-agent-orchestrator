@@ -331,7 +331,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _get_run_resource(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|workspace|outbox|agents
+        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|handoffs|results|workspace|outbox|agents
         if len(parts) < 3 or parts[0] != "api" or parts[1] != "runs":
             self._send_error_json(404, "not found")
             return
@@ -349,7 +349,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "d.required_model, d.required_provider_id, "
                         "d.instruction_text, d.cwd, "
                         "(SELECT COUNT(*) FROM attempts a WHERE a.task_id=t.task_id) "
-                        "AS attempt_count "
+                        "AS attempt_count, "
+                        "(SELECT a.attempt_id FROM attempts a WHERE a.task_id=t.task_id "
+                        " ORDER BY a.attempt_number DESC LIMIT 1) AS last_attempt_id, "
+                        "(SELECT a.agent_id FROM attempts a WHERE a.task_id=t.task_id "
+                        " ORDER BY a.attempt_number DESC LIMIT 1) AS last_agent_id, "
+                        "(SELECT c.session_ref_id FROM backend_calls c "
+                        " WHERE c.task_id=t.task_id ORDER BY c.requested_at DESC LIMIT 1) "
+                        "AS last_session_ref_id, "
+                        "(SELECT c.backend FROM backend_calls c WHERE c.task_id=t.task_id "
+                        " ORDER BY c.requested_at DESC LIMIT 1) AS last_backend, "
+                        "(SELECT a.model FROM attempts at JOIN agent_instances a "
+                        " ON a.agent_id=at.agent_id WHERE at.task_id=t.task_id "
+                        " ORDER BY at.attempt_number DESC LIMIT 1) AS last_model, "
+                        "(SELECT a.provider_id FROM attempts at JOIN agent_instances a "
+                        " ON a.agent_id=at.agent_id WHERE at.task_id=t.task_id "
+                        " ORDER BY at.attempt_number DESC LIMIT 1) AS last_provider_id "
                         "FROM tasks t JOIN task_dispatch_specs d ON d.task_id=t.task_id "
                         "WHERE t.run_id=? "
                         "ORDER BY created_at, task_id",
@@ -448,6 +463,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 payload = store.list_supervisor_plans(run_id)
             elif resource == "artifacts":
                 payload = store.list_artifacts(run_id)
+            elif resource == "handoffs":
+                payload = store.list_handoffs(run_id)
+                for item in payload:
+                    item["package"] = json.loads(str(item["package_json"]))
+            elif resource == "results":
+                payload = store.list_task_results(run_id)
             elif resource == "workspace":
                 row = store.connection.execute(
                     "SELECT * FROM run_workspaces WHERE run_id=?", (run_id,)
@@ -482,6 +503,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         task_rows = store.connection.execute(
             """
             SELECT t.task_id, t.state, t.access_mode, t.created_at,
+                   t.parent_task_id, t.dispatch_source, t.required_delivery,
                    d.required_role_id, d.instruction_text, d.cwd
             FROM tasks t
             JOIN task_dispatch_specs d ON d.task_id = t.task_id
@@ -584,9 +606,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "task_id": task_id,
                 "state": task["state"],
                 "access_mode": task["access_mode"],
+                "parent_task_id": task["parent_task_id"],
+                "dispatch_source": task["dispatch_source"],
+                "required_delivery": bool(task["required_delivery"]),
                 "role_id": task["required_role_id"],
                 "prompt": task["instruction_text"],
                 "messages": messages,
+                "handoffs": store.list_handoffs(run_id, task_id=task_id),
+                "results": store.list_task_results(run_id, task_id=task_id),
             })
         return {"tasks": result, "agents": list(agents.values())}
 

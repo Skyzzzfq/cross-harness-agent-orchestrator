@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from orchestrator.adapters.contracts import (
     AdapterCallRequest,
     BackendAdapter,
@@ -51,6 +53,34 @@ async def execute_adapter_call(
         reason="adapter-terminal",
         controller=controller,
     )
+    # Only an explicit result contract is eligible for structured persistence.
+    # Supervisor plan payloads deliberately do not contain ``status`` and stay
+    # in the backend-call audit record until the plan service consumes them.
+    if (
+        terminal.state == CallState.SUCCEEDED
+        and isinstance(terminal.structured, Mapping)
+        and "status" in terminal.structured
+    ):
+        try:
+            store.record_worker_result(
+                request.run_id,
+                request.task_id,
+                request.attempt_id,
+                terminal.structured,
+            )
+        except (ValueError, FencedAttemptError) as error:
+            # Do not turn a provider-success into a false completion. Keep the
+            # original call result and make the rejected contract observable.
+            with store.connection:
+                store._append_event(
+                    request.run_id,
+                    request.task_id,
+                    request.attempt_id,
+                    "task.result.rejected",
+                    None,
+                    None,
+                    {"reason": str(error)[:500]},
+                )
     return terminal
 
 
