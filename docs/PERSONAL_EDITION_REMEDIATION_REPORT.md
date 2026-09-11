@@ -2,7 +2,7 @@
 
 ## R0：冻结基线与能力实测
 
-更新时间：2026-09-11  
+更新时间：2026-09-11
 状态：**R0、R1 已完成；整体整改保持 `stage3: checkpoint`，R2–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
@@ -110,7 +110,7 @@ Run 6 的主管调用本身是成功的：
 
 ## R1：角色模板、计划协议与批准状态
 
-更新时间：2026-09-11  
+更新时间：2026-09-11
 状态：**R1 已完成（Fake 证据通过；真实 Codex 计划生成尚未在本环境重跑，记录为未验证而非成功）。**
 
 ### 1. 已实现
@@ -138,6 +138,36 @@ Run 6 的主管调用本身是成功的：
 
 Fake 主管可以生成 v2 计划、在人工批准前保持零 Worker 派发、批准后原子物化并支持重复点击。真实 Codex/CodeBuddy 计划生成仍需在有可用登录态的本机执行一次；当前只保留明确的“未验证”状态。R2 可在此契约基线上继续，但不能宣称真实端到端已通过。
 
+## R2：任务尝试隔离与四区存储
+
+更新时间：2026-09-11
+状态：**R2 已完成（本地 Git/Fake 隔离证据通过；真实 Codex/CodeBuddy 权限边界尚未重新实测）。**
+
+### 1. 已实现
+
+- `orchestrator/workspace/run_manager.py` 为新 Run 创建 `.agent-hub/runs/<run-id>/manifest.json`，登记 scratch、shared、mounts、resources、worktrees 和 integration 区的路径、owner、访问类型、资源版本与生命周期；运行时目录写入 Git exclude，不污染用户 checkout 状态。
+- 写任务在 claim 时按 `task_id/attempt_id` 创建独立 Git worktree，并把 `attempts.workspace_path`、`scratch_path`、`base_commit` 持久化；读任务获得基于 base commit 的只读资源快照。旧 Run（无团队快照）保留旧目录模式，不静默迁移。
+- 增加 scratch 分配、mounts 空清单、resources 快照描述和 artifact 发布清单；artifact 保存内容摘要、候选 commit、生产者、尝试和版本。
+- schema v17 新增尝试工作区字段、`run_workspaces` 和 `artifacts` 表，并提供列出/登记接口；控制台增加 `workspace`、`artifacts`、`plans` 资源。
+- `GitWorkspaceManager.commit_managed_changes` 现在解析真实 porcelain diff：scope 外新增/修改/删除/重命名一律拒绝，scope 内声明文件/目录必须实际变更；不再接受“同 worktree 的辅助文件”作为例外。进程重启后可 adopt 已登记 worktree。
+- 控制台审核写任务优先提交持久化的 task/attempt worktree；未启用新布局的历史 Run 继续使用兼容路径。
+
+### 2. R2 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 四区 manifest、双尝试副本和 scratch 隔离 | PASS | `tests/test_personal_r2.py::R2WorkspaceTests.test_manifest_zones_and_attempt_worktrees_are_distinct` |
+| 实际 diff 超出 write_scope 拒绝 | PASS | `tests/test_personal_r2.py::R2WorkspaceTests.test_actual_diff_outside_scope_is_rejected` |
+| artifact 摘要/版本清单 | PASS | `tests/test_personal_r2.py::R2WorkspaceTests.test_artifact_manifest_records_immutable_entry` |
+| Scheduler 写派发使用 attempt worktree 并持久化基线 | PASS | `tests/test_personal_r2.py::R2StoreWiringTests.test_write_dispatch_uses_attempt_worktree` |
+| 既有真实/Fake Git 回归 | PASS | `tests/test_stage2_writable_flow.py`、`tests/test_stage3_windows.py`、`tests/test_stage3_console.py` |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；318 项，317 通过、1 跳过 |
+| 真实后端硬权限/并行写入 | **未验证** | R0 已明确同 Windows 用户目录隔离并非硬沙箱；本轮没有把 SDK 声明写成安全证据。 |
+
+### 3. R2 出口与限制
+
+新 Run 的写任务已经获得 task/attempt 级副本，实际提交前 scope 外变更会被拦截，主 checkout 指纹在分配副本时不变。合并执行器的现有串行 Git 交付仍作为兼容路径保留；真正把组合结果完全落到 Run 的 integration worktree、再按策略交付用户分支，留在后续 R3/R4 对账。真实 Codex/CodeBuddy 的权限探针和两 Worker 真实重叠写入仍需在可用登录态环境复测。
+
 ## 5. 下一步
 
-R1 已完成，下一切片是 R2：实现 Run 四区 manifest、task/attempt worktree、scratch/只读资源快照、artifact manifest 和实际 diff/write_scope 校验。整体状态仍是 `stage3: checkpoint`，不是个人版最终验收。
+R2 已完成，下一切片是 R3：生成有版本和引用的任务移交包，绑定 Agent/会话/尝试，回收结构化结果并做父任务聚合。整体状态仍是 `stage3: checkpoint`，不是个人版最终验收。

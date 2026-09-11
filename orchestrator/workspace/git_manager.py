@@ -188,6 +188,23 @@ class GitWorkspaceManager:
         self._managed_worktrees.add(resolved_target)
         return resolved_target
 
+    def adopt_worktree(self, worktree: Path) -> Path:
+        """Register an existing Hub-created worktree after a process restart."""
+        resolved = worktree.resolve()
+        toplevel = Path(
+            _git(resolved, "rev-parse", "--show-toplevel").stdout.strip()
+        ).resolve()
+        if toplevel != resolved:
+            raise ValueError("worktree registration mismatch")
+        common_dir_raw = _git(resolved, "rev-parse", "--git-common-dir").stdout.strip()
+        common_dir = Path(common_dir_raw)
+        if not common_dir.is_absolute():
+            common_dir = resolved / common_dir
+        if common_dir.resolve() != (self.repository / ".git").resolve():
+            raise ValueError("worktree belongs to a different repository")
+        self._managed_worktrees.add(resolved)
+        return resolved
+
     def commit_file(
         self,
         worktree: Path,
@@ -242,23 +259,36 @@ class GitWorkspaceManager:
         status_lines = _git(
             worktree_root, "status", "--porcelain=v1", "--untracked-files=all"
         ).stdout.splitlines()
-        changed_paths = {
-            line[3:].strip().replace("\\", "/").split(" -> ")[-1]
-            for line in status_lines
-            if len(line) >= 4
-        }
+        changed_paths: set[str] = set()
+        for line in status_lines:
+            if len(line) < 4:
+                continue
+            raw_path = line[3:].strip().replace("\\", "/")
+            if " -> " in raw_path:
+                old_path, new_path = raw_path.split(" -> ", 1)
+                changed_paths.update({old_path, new_path})
+            else:
+                changed_paths.add(raw_path)
         scope_set = set(normalized)
-        # 声明 scope 内的文件必须确实被改动；真实 agent 可能额外产出辅助文件
-        # （会话笔记、临时文件等），只要不越出受管 worktree 即接受。
-        # 越界（scope 之外的越权写）仍由 WorkspacePolicy 在创建任务时按 cwd/
-        # write_scope 约束——这里只需保证声明的 scope 文件确实落地。
-        missing = scope_set - changed_paths
+        extras = sorted(
+            path for path in changed_paths
+            if not any(_path_matches_scope(path, scope) for scope in scope_set)
+        )
+        if extras:
+            raise ValueError(
+                f"worktree changes outside declared scope: {extras}; "
+                f"declared scope: {sorted(scope_set)}"
+            )
+        missing = sorted(
+            scope for scope in scope_set
+            if not any(_path_matches_scope(path, scope) for path in changed_paths)
+        )
         if missing:
             raise ValueError(
-                f"declared scope files were not changed: {sorted(missing)}; "
+                f"declared scope files were not changed: {missing}; "
                 f"worktree changes: {sorted(changed_paths)}"
             )
-        to_add = sorted(scope_set & changed_paths)
+        to_add = sorted(changed_paths)
         _git(worktree_root, "add", "--", *to_add)
         _git(worktree_root, "commit", "-m", message)
         return self.head(worktree_root)
@@ -443,3 +473,12 @@ class GitWorkspaceManager:
             common_dir = worktree / common_dir
         if common_dir.resolve() != (self.repository / ".git").resolve():
             raise ValueError("worktree belongs to a different repository")
+
+
+def _path_matches_scope(path: str, scope: str) -> bool:
+    """Treat a trailing slash/directory scope as a path prefix."""
+    normalized_path = path.strip("/").replace("\\", "/")
+    normalized_scope = scope.strip("/").replace("\\", "/")
+    return normalized_path == normalized_scope or normalized_path.startswith(
+        normalized_scope.rstrip("/") + "/"
+    )

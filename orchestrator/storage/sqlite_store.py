@@ -143,7 +143,7 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 16
+CURRENT_SCHEMA_VERSION = 17
 
 
 class SQLiteStateStore:
@@ -155,9 +155,11 @@ class SQLiteStateStore:
         path: Path,
         *,
         workspace_policy: Any | None = None,
+        workspace_manager: Any | None = None,
     ) -> None:
         self.path = path
         self.workspace_policy = workspace_policy
+        self.workspace_manager = workspace_manager
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # 允许跨线程使用同一连接（控制台等本地工具在服务线程访问）；
         # SQLite 会串行化写事务，调用方仍需避免并发修改同一连接。
@@ -235,6 +237,46 @@ class SQLiteStateStore:
             "digest": row["team_snapshot_digest"],
             "approval_mode": str(row["approval_mode"] or "auto"),
         }
+
+    def list_artifacts(self, run_id: str, *, task_id: str | None = None) -> list[dict[str, Any]]:
+        if task_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM artifacts WHERE run_id=? ORDER BY published_at, artifact_id",
+                (run_id,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM artifacts WHERE run_id=? AND task_id=? "
+                "ORDER BY published_at, artifact_id",
+                (run_id, task_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_artifact(self, entry: Mapping[str, Any]) -> str:
+        required = {
+            "artifact_id", "run_id", "task_id", "attempt_id", "path",
+            "sha256", "producer", "version", "published_at",
+        }
+        missing = required - set(entry)
+        if missing:
+            raise ValueError(f"artifact entry missing fields: {sorted(missing)}")
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO artifacts(
+                    artifact_id, run_id, task_id, attempt_id, path, sha256,
+                    candidate_commit, producer, version, published_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(entry["artifact_id"]), str(entry["run_id"]),
+                    str(entry["task_id"]), str(entry["attempt_id"]),
+                    str(entry["path"]), str(entry["sha256"]),
+                    entry.get("candidate_commit"), str(entry["producer"]),
+                    int(entry["version"]), str(entry["published_at"]),
+                ),
+            )
+        return str(entry["artifact_id"])
 
     def save_supervisor_plan(
         self,
@@ -1409,6 +1451,14 @@ class SQLiteStateStore:
                 # 硬预算达到上限：零新增调用，停止派发。
                 self.connection.commit()
                 return None
+            run_snapshot_row = self.connection.execute(
+                "SELECT team_snapshot_json FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            workspace_enabled = (
+                self.workspace_manager is not None
+                and run_snapshot_row is not None
+                and bool(run_snapshot_row["team_snapshot_json"])
+            )
             candidates = self.connection.execute(
                 """
                 SELECT t.task_id, t.run_id, t.access_mode, t.write_scope_json,
@@ -1485,6 +1535,39 @@ class SQLiteStateStore:
             call_id = f"call-{attempt_id}"
             lease_id = f"lease-{uuid.uuid4().hex}"
             expires_at = (as_of + timedelta(seconds=lease_seconds)).isoformat()
+            workspace_path = str(row["cwd"])
+            scratch_path: str | None = None
+            base_commit: str | None = None
+            if workspace_enabled:
+                manifest = self.workspace_manager.ensure_run(run_id)
+                manifest_path = Path(str(manifest.root)) / "manifest.json"
+                manifest_digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+                self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO run_workspaces(
+                        run_id, manifest_path, manifest_digest, lifecycle,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        str(manifest_path),
+                        manifest_digest,
+                        manifest.lifecycle,
+                        now_value,
+                        now_value,
+                    ),
+                )
+                allocation = self.workspace_manager.allocate_attempt(
+                    run_id,
+                    str(row["task_id"]),
+                    attempt_id,
+                    access_mode=str(row["access_mode"]),
+                    agent_id=str(row["agent_id"]),
+                )
+                scratch_path = str(allocation["scratch_path"])
+                base_commit = str(allocation["base_commit"])
+                workspace_path = str(allocation["workspace_path"])
             request = AdapterCallRequest(
                 call_id=call_id,
                 run_id=run_id,
@@ -1502,7 +1585,7 @@ class SQLiteStateStore:
                 prompt=row["instruction_text"],
                 policy=AccessPolicy(
                     access_mode=row["access_mode"],
-                    cwd=row["cwd"],
+                    cwd=workspace_path,
                     timeout_seconds=float(row["timeout_seconds"]),
                     write_scope=tuple(json.loads(row["write_scope_json"])),
                 ),
@@ -1511,8 +1594,9 @@ class SQLiteStateStore:
                 """
                 INSERT INTO attempts(
                     attempt_id, task_id, agent_id, state, attempt_number,
-                    generation, created_at, updated_at
-                ) VALUES (?, ?, ?, 'ASSIGNED', ?, ?, ?, ?)
+                    generation, workspace_path, scratch_path, base_commit,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, 'ASSIGNED', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     attempt_id,
@@ -1520,6 +1604,9 @@ class SQLiteStateStore:
                     row["agent_id"],
                     attempt_number,
                     generation,
+                    workspace_path,
+                    scratch_path,
+                    base_commit,
                     now_value,
                     now_value,
                 ),
@@ -1603,6 +1690,9 @@ class SQLiteStateStore:
                     "generation": generation,
                     "scheduler_owner": controller.owner_id,
                     "controller_epoch": controller.epoch,
+                    "workspace_path": workspace_path,
+                    "scratch_path": scratch_path,
+                    "base_commit": base_commit,
                 },
             )
             self.connection.commit()
@@ -5750,6 +5840,8 @@ class SQLiteStateStore:
             self._migrate_to_v15()
         if version < 16:
             self._migrate_to_v16()
+        if version < 17:
+            self._migrate_to_v17()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -6340,6 +6432,50 @@ class SQLiteStateStore:
                 "ON supervisor_plans(run_id, supervisor_task_id, revision)"
             )
             self.connection.execute("PRAGMA user_version=16")
+
+    def _migrate_to_v17(self) -> None:
+        """Record attempt-level workspace allocation and published artifacts."""
+        with self.connection:
+            attempt_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(attempts)")
+            }
+            for name, declaration in (
+                ("workspace_path", "TEXT"),
+                ("scratch_path", "TEXT"),
+                ("base_commit", "TEXT"),
+            ):
+                if name not in attempt_columns:
+                    self.connection.execute(
+                        f"ALTER TABLE attempts ADD COLUMN {name} {declaration}"
+                    )
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS run_workspaces (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                    manifest_path TEXT NOT NULL,
+                    manifest_digest TEXT NOT NULL,
+                    lifecycle TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    candidate_commit TEXT,
+                    producer TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    published_at TEXT NOT NULL,
+                    UNIQUE(run_id, task_id, attempt_id, path, version)
+                );
+                CREATE INDEX IF NOT EXISTS idx_artifacts_task
+                    ON artifacts(run_id, task_id, attempt_id, version);
+                PRAGMA user_version=17;
+                """
+            )
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(

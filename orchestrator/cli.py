@@ -312,7 +312,12 @@ def _run_serve(
     max_ticks: int | None,
     backend: str = "fake",
 ) -> dict[str, object]:
-    store = SQLiteStateStore(_resolve_db(cwd, db))
+    from orchestrator.workspace.run_manager import RunWorkspaceManager
+
+    store = SQLiteStateStore(
+        _resolve_db(cwd, db),
+        workspace_manager=RunWorkspaceManager(cwd),
+    )
     try:
         # P1-04：常驻服务可配置 Fake/Codex/中国站 CodeBuddy Adapter。
         # 真实写任务需配合受管 worktree 注册与 WorkspacePolicy。
@@ -355,7 +360,12 @@ def _run_serve_team(
     """按保存的 team 配置启动常驻循环（支持多后端 pools）。"""
     from orchestrator.core.config import load_team_spec
 
-    store = SQLiteStateStore(_resolve_db(cwd, db))
+    from orchestrator.workspace.run_manager import RunWorkspaceManager
+
+    store = SQLiteStateStore(
+        _resolve_db(cwd, db),
+        workspace_manager=RunWorkspaceManager(cwd),
+    )
     try:
         resolved_team = team_path if team_path.is_absolute() else cwd / team_path
         spec = load_team_spec(resolved_team)

@@ -331,7 +331,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _get_run_resource(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|outbox|agents
+        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|workspace|outbox|agents
         if len(parts) < 3 or parts[0] != "api" or parts[1] != "runs":
             self._send_error_json(404, "not found")
             return
@@ -446,6 +446,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 )
             elif resource == "plans":
                 payload = store.list_supervisor_plans(run_id)
+            elif resource == "artifacts":
+                payload = store.list_artifacts(run_id)
+            elif resource == "workspace":
+                row = store.connection.execute(
+                    "SELECT * FROM run_workspaces WHERE run_id=?", (run_id,)
+                ).fetchone()
+                payload = None if row is None else dict(row)
             elif resource == "chat":
                 payload = self._chat_payload(run_id)
             elif resource == "worktree":
@@ -845,7 +852,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if str(task["state"]) != "REVIEW":
                 raise ValueError(f"task {task_id} is {task['state']}, must be REVIEW")
             attempt = store.connection.execute(
-                "SELECT attempt_id FROM attempts WHERE task_id=? "
+                "SELECT attempt_id, workspace_path, base_commit FROM attempts WHERE task_id=? "
                 "ORDER BY attempt_number DESC LIMIT 1",
                 (task_id,),
             ).fetchone()
@@ -877,9 +884,31 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             from orchestrator.workspace.merge_executor import MergeExecutor
 
             info = self.server.ensure_run_worktree(run_id)
-            worktree = Path(info["worktree"])
+            if (
+                attempt is not None
+                and attempt["workspace_path"]
+                and getattr(store, "workspace_manager", None) is not None
+            ):
+                worktree = Path(str(attempt["workspace_path"]))
+                workspace_manager = store.workspace_manager
+                git_manager = workspace_manager._git_manager_for(
+                    run_id, worktree.parent
+                )
+                git_manager.adopt_worktree(worktree)
+                info = {
+                    "run_id": run_id,
+                    "worktree": str(worktree),
+                    "base_commit": str(attempt["base_commit"] or info["base_commit"]),
+                }
+            else:
+                worktree = Path(info["worktree"])
             scope = json.loads(task["write_scope_json"] or "[]")
-            result_commit = self.server.git_manager().commit_managed_changes(
+            commit_manager = (
+                git_manager
+                if "git_manager" in locals()
+                else self.server.git_manager()
+            )
+            result_commit = commit_manager.commit_managed_changes(
                 worktree, tuple(scope), f"console approve {task_id}"
             )
             store.enqueue_merge(
@@ -1272,7 +1301,12 @@ def run_console(
     worktree: str | None = None,
 ) -> None:
     db_path = db if db.is_absolute() else project_root / db
-    store = SQLiteStateStore(db_path)
+    from orchestrator.workspace.run_manager import RunWorkspaceManager
+
+    store = SQLiteStateStore(
+        db_path,
+        workspace_manager=RunWorkspaceManager(project_root),
+    )
     actual_port = find_free_port(host, port)
     if actual_port is None:
         print(f"console error: no free port in {port}..{port + 19} on {host}")
