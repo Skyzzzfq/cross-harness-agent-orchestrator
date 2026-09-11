@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1、R2、R3 已完成；整体整改保持 `stage3: checkpoint`，R4–R8 尚未开始。**
+状态：**R0、R1、R2、R3、R4 已完成；整体整改保持 `stage3: checkpoint`，R5–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -196,6 +196,34 @@ Fake 主管可以生成 v2 计划、在人工批准前保持零 Worker 派发、
 
 本地 Fake 场景已经能观察到 Hub 生成移交包、两个不同 task/attempt 的结果、已验证依赖释放和父任务引用汇总；重启/晚到结果通过 attempt 状态和 digest 拒绝旧写入。真实后端的结构化输出仍需在登录态可用时补一次小型实测，R4 再负责独立验证、返工和 Git 集成交付。因此整体仍是 `stage3: checkpoint`，不是个人版最终验收。
 
+## R4：独立验证、返工与 Git 交付
+
+更新时间：2026-09-11
+状态：**R4 已完成（本地 Git/Fake 证据通过；真实后端端到端审核尚未重测）。**
+
+### 1. 已实现
+
+- 新增 `orchestrator/verification.py`。验证器只接受固定检查名：`commit_exists`、`diff_check`、`python_compile`、`unit_tests`；命令由 Hub 生成，使用参数数组、`shell=False` 和超时，模型不能注入任意 shell 命令。
+- schema v19 新增 `verification_evidence`，每条证据绑定 run/task/attempt、candidate commit、检查定义摘要、实际 cwd、退出码、输出摘要哈希和环境描述；同一候选/检查幂等保存。
+- 新 Run 的审核通过和 merge 入队都要求同一 candidate 的 PASS 证据及证据绑定的审核决定。候选 commit 改变、证据引用缺失或跨 attempt 时拒绝；旧 Run 保留兼容路径。
+- 控制台写任务审核在新 Run 中先生成候选、运行固定验证，再保存 evidence-bound review；新增 `/api/runs/{run_id}/evidence` 资源。集成仍复用已有串行 merge queue/outbox 原子闭环。
+- `reassign_task` 增加最多两轮返工上限，旧候选和证据保留，晚到结果继续由 R3 attempt fencing 隔离。
+
+### 2. R4 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 固定检查、candidate commit 和 evidence 绑定后允许入队 | PASS | `tests/test_personal_r4.py::R4VerificationTests.test_fixed_checks_and_evidence_bound_review_allow_merge` |
+| 旧 evidence 不能批准另一 candidate，伪造 merge 被拒绝 | PASS | `tests/test_personal_r4.py::R4VerificationTests.test_old_evidence_cannot_approve_another_candidate` |
+| 返工最多两轮 | PASS | `tests/test_personal_r4.py::R4VerificationTests.test_rework_is_bounded_to_two_rounds` |
+| 既有审核/merge/outbox/Windows 回归 | PASS | `tests/test_stage2_atomic_merge.py`、`tests/test_stage2_writable_flow.py`、`tests/test_stage3_console.py` |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；324 项，323 通过、1 跳过 |
+| 真实后端独立审核/返工 | **未验证** | 当前 Codex/CodeBuddy 真实 Adapter 尚未在本轮运行完整 evidence-bound 流程。 |
+
+### 3. R4 出口与限制
+
+Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → merge 入队”的最小闭环，并保留旧候选和证据。R5 仍需补耐久消息、取消确认和预算回收；真实后端的独立审核与返工继续保持未验证，不宣称个人版最终验收。
+
 ## 5. 下一步
 
-R3 已完成，下一切片是 R4：把 candidate/artifact 交给独立验证器，绑定审核证据和 commit，支持有限返工并串行集成。真实后端能力未验证项保持公开记录。
+R4 已完成，下一切片是 R5：补齐持久消息投递、取消/晚到结果语义和预算原子预留。

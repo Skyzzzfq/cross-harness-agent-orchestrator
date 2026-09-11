@@ -143,7 +143,7 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 19
 
 
 class SQLiteStateStore:
@@ -317,6 +317,162 @@ class SQLiteStateStore:
             item["artifact_refs"] = json.loads(str(item["artifact_refs_json"]))
             results.append(item)
         return results
+
+    def list_verification_evidence(
+        self, run_id: str, *, task_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM verification_evidence WHERE run_id = ?"
+        args: list[Any] = [run_id]
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            args.append(task_id)
+        if attempt_id is not None:
+            sql += " AND attempt_id = ?"
+            args.append(attempt_id)
+        sql += " ORDER BY created_at, evidence_id"
+        return [dict(row) for row in self.connection.execute(sql, args).fetchall()]
+
+    def record_verification_evidence(
+        self,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        *,
+        candidate_commit: str,
+        check_name: str,
+        check_definition_digest: str,
+        command: Any,
+        cwd: str,
+        exit_code: int,
+        status: str,
+        output_sha256: str,
+        output_summary: str,
+        environment: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"PASS", "FAIL", "BLOCKED"}:
+            raise ValueError("verification status must be PASS, FAIL, or BLOCKED")
+        for name, value in (
+            ("candidate_commit", candidate_commit),
+            ("check_name", check_name),
+            ("check_definition_digest", check_definition_digest),
+            ("cwd", cwd),
+            ("output_sha256", output_sha256),
+        ):
+            if not str(value).strip():
+                raise ValueError(f"{name} must not be empty")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            owner = self.connection.execute(
+                """
+                SELECT t.run_id, a.workspace_path
+                FROM tasks t JOIN attempts a ON a.task_id = t.task_id
+                WHERE t.run_id = ? AND t.task_id = ? AND a.attempt_id = ?
+                """,
+                (run_id, task_id, attempt_id),
+            ).fetchone()
+            if owner is None:
+                raise FencedAttemptError("verification references an unknown attempt")
+            candidate = self.connection.execute(
+                """
+                SELECT 1 FROM task_results
+                WHERE run_id = ? AND task_id = ? AND attempt_id = ?
+                  AND candidate_commit = ?
+                  AND status IN ('submitted', 'verified')
+                LIMIT 1
+                """,
+                (run_id, task_id, attempt_id, candidate_commit),
+            ).fetchone()
+            if candidate is None:
+                raise ValueError("verification candidate is not a published worker result")
+            now = utc_now()
+            command_json = json.dumps(
+                command, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            environment_json = json.dumps(
+                dict(environment or {}), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )
+            existing = self.connection.execute(
+                """
+                SELECT * FROM verification_evidence
+                WHERE attempt_id = ? AND candidate_commit = ? AND check_name = ?
+                  AND check_definition_digest = ?
+                """,
+                (attempt_id, candidate_commit, check_name, check_definition_digest),
+            ).fetchone()
+            if existing is not None:
+                self.connection.commit()
+                return dict(existing)
+            evidence_id = f"evidence-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO verification_evidence(
+                    evidence_id, run_id, task_id, attempt_id, candidate_commit,
+                    check_name, check_definition_digest, command_json, cwd,
+                    exit_code, status, output_sha256, output_summary,
+                    environment_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    evidence_id, run_id, task_id, attempt_id, candidate_commit,
+                    check_name, check_definition_digest, command_json, cwd,
+                    int(exit_code), status, output_sha256, str(output_summary)[:4000],
+                    environment_json, now,
+                ),
+            )
+            self._append_event(
+                run_id, task_id, attempt_id, "verification.evidence.recorded",
+                None, status,
+                {
+                    "evidence_id": evidence_id,
+                    "candidate_commit": candidate_commit,
+                    "check_name": check_name,
+                    "status": status,
+                },
+            )
+            self.connection.commit()
+            return dict(
+                self.connection.execute(
+                    "SELECT * FROM verification_evidence WHERE evidence_id = ?",
+                    (evidence_id,),
+                ).fetchone()
+            )
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def verification_gate(
+        self, run_id: str, task_id: str, attempt_id: str, candidate_commit: str
+    ) -> dict[str, Any]:
+        evidence = self.connection.execute(
+            """
+            SELECT evidence_id, check_name, status, candidate_commit
+            FROM verification_evidence
+            WHERE run_id = ? AND task_id = ? AND attempt_id = ?
+              AND candidate_commit = ?
+            ORDER BY created_at, evidence_id
+            """,
+            (run_id, task_id, attempt_id, candidate_commit),
+        ).fetchall()
+        decisions = self.connection.execute(
+            """
+            SELECT decision_id, layer, decision, detail_json
+            FROM review_decisions
+            WHERE run_id = ? AND task_id = ? AND attempt_id = ?
+              AND decision IN ('PASS', 'APPROVED')
+            ORDER BY created_at, decision_id
+            """,
+            (run_id, task_id, attempt_id),
+        ).fetchall()
+        passed = [row for row in evidence if row["status"] == "PASS"]
+        return {
+            "candidate_commit": candidate_commit,
+            "evidence": [dict(row) for row in evidence],
+            "passed_checks": [str(row["check_name"]) for row in passed],
+            "review_decisions": [dict(row) for row in decisions],
+            "ready": bool(passed and decisions),
+        }
 
     def _candidate_commit_exists_tx(self, workspace_path: str | None, commit: str) -> bool:
         if not commit.strip():
@@ -2683,6 +2839,16 @@ class SQLiteStateStore:
                 raise ValueError(
                     f"attempt {attempt_id} is terminal ({attempt_row['state']}), cannot merge"
                 )
+            run_snapshot = self.connection.execute(
+                "SELECT team_snapshot_json FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if run_snapshot is not None and run_snapshot["team_snapshot_json"]:
+                gate = self.verification_gate(run_id, task_id, attempt_id, result_commit)
+                if not gate["ready"]:
+                    raise ValueError(
+                        "candidate cannot enter merge queue before PASS verification "
+                        "and an evidence-bound review decision"
+                    )
             merge_id = f"merge-{uuid.uuid4().hex[:16]}"
             idempotency_key = f"{run_id}:{task_id}:{attempt_id}"
             self.connection.execute(
@@ -3652,6 +3818,15 @@ class SQLiteStateStore:
             state = TaskState(row["state"])
             if state not in {TaskState.REVIEW, TaskState.FAILED}:
                 raise ValueError(f"task in state {state.value} cannot be reassigned")
+            rework_count = self.connection.execute(
+                """
+                SELECT COUNT(*) FROM events
+                WHERE run_id = ? AND task_id = ? AND kind = 'task.reassigned'
+                """,
+                (run_id, task_id),
+            ).fetchone()[0]
+            if int(rework_count) >= 2:
+                raise ValueError("task rework limit reached (maximum two rounds)")
             # 清理进行中的 attempt（标记 CANCELLED，晚到结果被隔离）
             self.connection.execute(
                 """
@@ -3702,6 +3877,34 @@ class SQLiteStateStore:
             self._ensure_authority_tx(authority, now)
             if authority.run_id != run_id:
                 raise FencedAuthorityError("authority token belongs to another Run")
+            snapshot = self.connection.execute(
+                "SELECT team_snapshot_json FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if snapshot is not None and snapshot["team_snapshot_json"] and decision in {
+                "PASS", "APPROVED"
+            }:
+                if not attempt_id:
+                    raise ValueError("approved review requires an attempt_id")
+                candidate_commit = str(detail.get("candidate_commit") or "").strip()
+                evidence_refs = detail.get("evidence_refs")
+                if not candidate_commit or not isinstance(evidence_refs, (list, tuple)) or not evidence_refs:
+                    raise ValueError(
+                        "approved review requires candidate_commit and evidence_refs"
+                    )
+                placeholders = ",".join("?" for _ in evidence_refs)
+                evidence_rows = self.connection.execute(
+                    f"""
+                    SELECT evidence_id FROM verification_evidence
+                    WHERE run_id = ? AND task_id = ? AND attempt_id = ?
+                      AND candidate_commit = ? AND status = 'PASS'
+                      AND evidence_id IN ({placeholders})
+                    """,
+                    (run_id, task_id, attempt_id, candidate_commit, *map(str, evidence_refs)),
+                ).fetchall()
+                if len(evidence_rows) != len(set(map(str, evidence_refs))):
+                    raise ValueError(
+                        "approved review references missing or mismatched verification evidence"
+                    )
             decision_id = f"review-{uuid.uuid4().hex[:16]}"
             self.connection.execute(
                 """
@@ -6392,6 +6595,8 @@ class SQLiteStateStore:
             self._migrate_to_v17()
         if version < 18:
             self._migrate_to_v18()
+        if version < 19:
+            self._migrate_to_v19()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -7098,6 +7303,36 @@ class SQLiteStateStore:
                 CREATE INDEX IF NOT EXISTS idx_task_results_task
                     ON task_results(run_id, task_id, created_at);
                 PRAGMA user_version=18;
+                """
+            )
+
+    def _migrate_to_v19(self) -> None:
+        """Persist independent, candidate-bound verification evidence."""
+        with self.connection:
+            self.connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS verification_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    attempt_id TEXT NOT NULL REFERENCES attempts(attempt_id),
+                    candidate_commit TEXT NOT NULL,
+                    check_name TEXT NOT NULL,
+                    check_definition_digest TEXT NOT NULL,
+                    command_json TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    exit_code INTEGER NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('PASS', 'FAIL', 'BLOCKED')),
+                    output_sha256 TEXT NOT NULL,
+                    output_summary TEXT NOT NULL,
+                    environment_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(attempt_id, candidate_commit, check_name,
+                           check_definition_digest)
+                );
+                CREATE INDEX IF NOT EXISTS idx_verification_evidence_task
+                    ON verification_evidence(run_id, task_id, attempt_id, candidate_commit);
+                PRAGMA user_version=19;
                 """
             )
 

@@ -331,7 +331,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def _get_run_resource(self, path: str) -> None:
         parts = path.strip("/").split("/")
-        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|handoffs|results|workspace|outbox|agents
+        # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|handoffs|results|evidence|workspace|outbox|agents
         if len(parts) < 3 or parts[0] != "api" or parts[1] != "runs":
             self._send_error_json(404, "not found")
             return
@@ -469,6 +469,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     item["package"] = json.loads(str(item["package_json"]))
             elif resource == "results":
                 payload = store.list_task_results(run_id)
+            elif resource == "evidence":
+                payload = store.list_verification_evidence(run_id)
             elif resource == "workspace":
                 row = store.connection.execute(
                     "SELECT * FROM run_workspaces WHERE run_id=?", (run_id,)
@@ -895,14 +897,13 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     run_id, task_id, controller, authority, reason="console-rework"
                 )
                 return
-            # approve
-            store.record_review_decision(
-                run_id, task_id, attempt_id=attempt_id, layer="human",
-                decision="APPROVED", decided_by="console", detail=detail,
-                authority=authority,
-            )
             if str(task["access_mode"]) == "read_only":
                 # 只读任务无 git 产出：直接终态（REVIEW -> COMPLETED 合法）
+                store.record_review_decision(
+                    run_id, task_id, attempt_id=attempt_id, layer="human",
+                    decision="APPROVED", decided_by="console", detail=detail,
+                    authority=authority,
+                )
                 store.transition_task(task_id, TaskState.COMPLETED, reason="console-approve")
                 return
             # 写任务：worktree 产出 commit -> 入队 -> 真实集成
@@ -937,6 +938,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             )
             result_commit = commit_manager.commit_managed_changes(
                 worktree, tuple(scope), f"console approve {task_id}"
+            )
+            run_snapshot = store.run_snapshot(run_id)
+            if run_snapshot.get("snapshot") is not None:
+                from orchestrator.verification import VerificationService
+
+                requested_checks = body.get("checks")
+                checks = (
+                    tuple(str(item) for item in requested_checks)
+                    if isinstance(requested_checks, list) and requested_checks
+                    else ("commit_exists", "diff_check")
+                )
+                evidence = VerificationService(store).verify_candidate(
+                    run_id, task_id, attempt_id, result_commit, checks=checks
+                )
+                if any(item.status != "PASS" for item in evidence):
+                    raise ValueError("candidate verification did not pass; inspect /evidence")
+                detail["candidate_commit"] = result_commit
+                detail["evidence_refs"] = [item.evidence_id for item in evidence]
+            store.record_review_decision(
+                run_id, task_id, attempt_id=attempt_id, layer="human",
+                decision="APPROVED", decided_by="console", detail=detail,
+                authority=authority,
             )
             store.enqueue_merge(
                 run_id, task_id, attempt_id, result_commit,
