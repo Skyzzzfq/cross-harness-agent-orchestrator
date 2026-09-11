@@ -316,11 +316,12 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 ## R8：真实端到端验收门禁（checkpoint）
 
 更新时间：2026-09-11
-状态：**checkpoint。验收逻辑已实现，但当前账号环境的 CodeBuddy 实时探针返回 `interactive-login-required`，尚未产生可复核的 R8 双后端证据。**
+状态：**checkpoint。A/B/D 已通过 4 次同一冻结样例的真实记录；C/E/F/G/H/I/J 仍缺真实证据，尚不能声明个人版最终验收完成。**
 
 ### 1. 已实现
 
 - 新增 `scripts/personal_r8_acceptance.py`，冻结个人版样例标识 `personal-r8-fixed-sample-v1`、A--J 场景和最低重复次数；只读取证据，不启动模型、不修改 checkout、不执行删除或合并。
+- 新增 `scripts/personal_r8_real_evidence.py`，只读汇总真实 `demo --real` 报告，自动提取 A/B/D 的 Worker/session、并行重叠、独立审核、返工、集成和 checkout 指纹，并保留所有失败记录。
 - 旧 `.agent-hub/reports/stage3-real.json` 只能作为历史 E2 参考。即使历史报告为 20/20，缺少主管汇总、独立审核/返工、重启/取消、运行中引导、预算和单 Agent 对照时仍输出 `CHECKPOINT`。
 - 证据报告自动移除可能的 API key、token、密码、cookie 等字段；R8 只有 A--J 全部 PASS、双真实后端和固定样例契约齐全时才输出 `COMPLETE`。
 
@@ -330,11 +331,12 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 |---|---|---|
 | Codex 本地 SDK/保存登录探针 | PASS（只读） | `orchestrator probe`：SDK 可用、saved login present |
 | CodeBuddy 本地 SDK 探针 | PASS（能力可导入） | `orchestrator probe`：SDK/CLI 可用，登录未确认 |
-| CodeBuddy 实时登录探针 | **阻塞** | `orchestrator probe --live codebuddy`：`interactive-login-required` |
-| 历史 20 场景报告 | 历史参考 | `.agent-hub/reports/stage3-real.json`：20/20，但不满足 R8 A--J 契约 |
-| R8 门禁回归 | PASS | `tests/test_personal_r8.py`：5 项通过 |
-| R8 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；345 项，344 通过、1 跳过 |
-| 当前 R8 总状态 | **CHECKPOINT** | `scripts/personal_r8_acceptance.py` 输出 `.agent-hub/reports/personal-r8.json` |
+| CodeBuddy 实时登录探针 | PASS | 用户完成中国站登录后：`status=ready`、`auth=verified`、`response_matched=true` |
+| 真实主管 + 双 Worker / 审核返工 | PASS（A/B/D） | `.agent-hub/reports/personal-r8-evidence.json`：4 次成功真实记录，4 次失败记录保留；A/B/D 均达到最低 3 次 |
+| 历史 20 场景报告 | 历史参考 | `.agent-hub/reports/stage3-real.json`：20/20，但不满足 R8 C--J 契约 |
+| R8 门禁回归 | PASS | `tests/test_personal_r8.py`：6 项通过 |
+| R8 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；347 项，346 通过、1 跳过 |
+| 当前 R8 总状态 | **CHECKPOINT** | `scripts/personal_r8_acceptance.py --evidence .agent-hub/reports/personal-r8-evidence.json`：A/B/D PASS，C/E/F/G/H/I/J PENDING |
 
 ### 3. R8 门禁用法
 
@@ -344,9 +346,10 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 & '.venv\\Scripts\\python.exe' scripts\\personal_r8_acceptance.py
 ```
 
-真实验收后，使用符合 `personal-r8-v1` 的证据文件重新核验：
+真实样例报告汇总和门禁核验：
 
 ```powershell
+& '.venv\\Scripts\\python.exe' scripts\\personal_r8_real_evidence.py
 & '.venv\\Scripts\\python.exe' scripts\\personal_r8_acceptance.py `
   --evidence .agent-hub\\reports\\personal-r8-evidence.json
 ```
@@ -355,4 +358,4 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 
 ### 4. 未完成与下一步
 
-R8 仍缺真实主管 + 双 Worker 的一次输入闭环、真实并行重叠、独立 Reviewer 发现缺陷并返工、重启/取消不重复副作用、运行中引导的实际生效时机、预算封顶和单 Agent 对照。CodeBuddy 重新登录后，应先固定一个小型样例项目，再按 A--J 逐项记录证据并运行门禁；任何 FAIL 都保留 checkpoint，不得直接使用 `stage3: complete`。
+R8 仍缺真实依赖版本传递、格式错误/非法计划、重启/取消不重复副作用、运行中引导的实际生效时机、预算封顶、独立证据过期拒绝和单 Agent 对照（C/E/F/G/H/I/J）。下一步按固定样例逐项补齐这些证据；任何 FAIL 都保留 checkpoint，不得直接使用 `stage3: complete`。

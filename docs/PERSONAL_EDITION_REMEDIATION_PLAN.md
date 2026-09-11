@@ -311,7 +311,7 @@ A、B、D 至少各重复 3 次；每次记录失败，不只挑成功截图。�
 | R5 消息与预算 | **完成** | 本轮 R5 提交（见 `git log`） | schema v20；durable deliveries；取消确认与资源保留；进度心跳和预算 reservation；全量 331/330/1；真实后端即时引导/取消确认未验证 | 依赖 R4 |
 | R6 对话工作台 | **checkpoint（切片完成）** | 本轮 `stage3: checkpoint project agent conversation workspace` | 项目元数据 API；项目→角色→Agent 导航；chat cursor/events 与 Agent 过滤；运行中引导 durable 入队；全量 335/334/1 | 真实活动插话、跨 workspace 热切换和完整浏览器端到端仍待 R7/R8 处理 |
 | R7 恢复与文档 | **完成** | 本轮 `stage3: checkpoint recovery and personal edition documentation` | recovery-check 只读检查；reconcile 一次性回收；history-preview 清理候选；备份/恢复/端口/排障文档；R7 专项 5 项通过 | 不确认后端是否真正停止；不自动删除历史，R8 仍需真实验收 |
-| R8 真实验收 | **checkpoint（门禁已建立）** | `scripts/personal_r8_acceptance.py`；`tests/test_personal_r8.py`；全量 345/344/1 | CodeBuddy 实时探针要求交互登录；A–J 双后端真实证据、A/B/D 三连跑仍待执行 |
+| R8 真实验收 | **checkpoint（A/B/D 已通过）** | `scripts/personal_r8_acceptance.py`、`scripts/personal_r8_real_evidence.py`；A/B/D 4 次真实记录；全量 347/346/1 | C/E/F/G/H/I/J 真实证据仍待执行；不能使用 `stage3: complete` |
 
 建议每个切片内按“契约/测试 → 最小实现 → 回归 → 真实证据（适用时）→ 文档 → commit”完成。一个切片过大时追加 Rn-a/Rn-b，不跳过出口。按用户既有要求在已完成切片后提交并推送当前项目仓库；提交前核查实际 diff，仅包含该切片相关修改，禁止把凭据、运行数据、下载缓存或其他未归属改动一起上传。
 

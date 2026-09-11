@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from scripts.personal_r8_acceptance import (
     FORMAT_VERSION,
     SAMPLE_ID,
     evaluate_evidence,
 )
+from scripts.personal_r8_real_evidence import build_evidence
 
 
 def complete_evidence() -> dict:
@@ -146,6 +149,93 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
         report = evaluate_evidence(evidence)
         self.assertEqual(report["status"], "CHECKPOINT")
         self.assertEqual(report["scenarios"]["B"]["status"], "PENDING")
+
+    def test_real_report_converter_keeps_failures_and_derives_a_b_d(self) -> None:
+        checks = {
+            key: True
+            for key in (
+                "codex_chatgpt_auth",
+                "codex_plan_valid",
+                "real_workers_overlapped",
+                "codebuddy_sessions_distinct",
+                "worker_commits_share_base",
+                "review_a_passed",
+                "review_b1_requested_rework",
+                "codebuddy_rework_replaced_session",
+                "review_b2_passed",
+                "worker_a_completed",
+                "worker_b_completed",
+                "worker_b_first_attempt_rejected",
+                "worker_b_second_attempt_accepted",
+                "accepted_commits_integrated",
+                "rejected_commit_not_integrated",
+                "deterministic_content_passed",
+                "integration_repository_clean",
+                "structured_messages_persisted",
+                "user_checkout_head_unchanged",
+                "user_checkout_status_unchanged",
+                "user_checkout_contents_unchanged",
+                "plaintext_credentials_absent",
+            )
+        }
+
+        def report(run_id: str, passed: bool) -> dict:
+            return {
+                "status": "run-passed" if passed else "error",
+                "scenario_id": "real-poc-v1",
+                "run_id": run_id,
+                "checks": checks if passed else {"codex_plan_valid": False},
+                "evidence": {
+                    "failure": None if passed else {"error_type": "test", "message": "kept"},
+                    "workers": {
+                        "worker-a-attempt-1": {
+                            "status": "completed",
+                            "session_id": f"{run_id}-a",
+                            "duration_ms": 10,
+                            "content_matched": True,
+                        },
+                        "worker-b-attempt-1": {
+                            "status": "completed",
+                            "session_id": f"{run_id}-b1",
+                            "duration_ms": 11,
+                            "content_matched": True,
+                        },
+                        "worker-b-attempt-2": {
+                            "status": "completed",
+                            "session_id": f"{run_id}-b2",
+                            "duration_ms": 12,
+                            "content_matched": True,
+                        },
+                    },
+                    "reviews": {
+                        "worker-b-attempt-2": {"decision": {"decision": "PASS"}}
+                    },
+                    "git": {
+                        "worktrees": {
+                            "a": f"{run_id}/a",
+                            "b1": f"{run_id}/b1",
+                            "b2": f"{run_id}/b2",
+                        },
+                        "worker_a_result_commit": f"{run_id}-ca",
+                        "worker_b_rejected_commit": f"{run_id}-cb1",
+                        "worker_b_accepted_commit": f"{run_id}-cb2",
+                    },
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = []
+            for run_id, passed in (("run-a", True), ("run-b", True), ("run-failed", False)):
+                path = root / f"{run_id}.json"
+                path.write_text(json.dumps(report(run_id, passed)), encoding="utf-8")
+                paths.append(path)
+            evidence = build_evidence(paths, root=root)
+        self.assertEqual(evidence["successful_reports"], 2)
+        self.assertEqual(len(evidence["failure_records"]), 1)
+        self.assertEqual(evidence["scenarios"]["A"]["repetitions"], 2)
+        self.assertTrue(evidence["scenarios"]["B"]["distinct_worktrees"])
+        self.assertEqual(evidence["scenarios"]["D"]["post_rework_verification"][0]["review"]["decision"], "PASS")
 
 
 if __name__ == "__main__":
