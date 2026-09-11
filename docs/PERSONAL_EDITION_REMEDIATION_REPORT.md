@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11  
-状态：**R0 已完成；整体整改保持 `stage3: checkpoint`，R1–R8 尚未开始。**
+状态：**R0、R1 已完成；整体整改保持 `stage3: checkpoint`，R2–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -108,6 +108,36 @@ Run 6 的主管调用本身是成功的：
 | 每个缺口有后续切片 | PASS | R1 结构化计划/批准，R2 隔离，R3 会话/移交，R5 取消/预算，R6 对话/引导 |
 | 旧 Run 未被迁移或重放 | PASS | 仅查询活动库和导出样本；未执行控制、任务或合并操作 |
 
+## R1：角色模板、计划协议与批准状态
+
+更新时间：2026-09-11  
+状态：**R1 已完成（Fake 证据通过；真实 Codex 计划生成尚未在本环境重跑，记录为未验证而非成功）。**
+
+### 1. 已实现
+
+- `orchestrator/core/role_registry.py` 提供 supervisor、worker/implementation-worker、reviewer 三份版本化模板、角色绑定阻塞检查、团队能力目录和确定性 prompt builder；旧 schema-v1 team 文件缺少职责字段时自动补兼容模板。
+- `RoleSpec` 保存职责、禁止动作、输入/输出契约、工具/上下文策略和预算默认值；`to_dict()` 用于 Run 快照。
+- 计划协议兼容 v1，同时支持 v2 的 `revision`、`worker_concurrency`、`task_cap`、权限/预算、验收项、输入引用、任务类型、输出契约、模型/提供方约束；任务数量上限不再等同于 Worker 槽位。
+- schema v16 新增 Run 的团队快照、快照摘要、批准模式和 `supervisor_plans` revision 表。直接调用旧 API 保持 auto 兼容；控制台新建 Run 默认 `manual`，批准模式在创建时持久化。
+- 主管计划先校验/预览，批准绑定 revision、规范化摘要和权限范围；重复批准幂等，摘要或权限不匹配拒绝。批准前不会创建 Worker。
+- 计划格式失败保留原始 `plan.rejected`，最多安排一次新的主管尝试；第二次失败写入 `plan.needs_input`，不派发 Worker。旧 rejected 事件不阻塞后续新 call/revision。
+- 控制台增加 `GET /api/runs/{run_id}/plans`，以及 `POST /api/runs/{run_id}/plans/{task_id}/approve|reject`。
+
+### 2. R1 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| v2 六任务、两个并发槽 | PASS | `tests/test_personal_r1.py::R1ContractTests.test_two_slots_allow_six_sequential_tasks` |
+| manual 预览、批准前零子任务、批准幂等 | PASS | `tests/test_personal_r1.py::R1ApprovalTests.test_manual_plan_is_previewed_then_approved_once` |
+| 旧 supervisor 规划/serve 行为兼容 | PASS | `tests/test_supervisor_planning.py`（16 项） |
+| 角色 prompt 与旧 team 兼容 | PASS | `tests/test_personal_r1.py::R1ContractTests.test_legacy_role_gets_template_and_prompt` |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；314 项，313 通过、1 跳过 |
+| 真实 Codex 合法计划 | **未验证** | 本轮未消耗真实后端额度；不得把 Fake 结果写成真实成功。 |
+
+### 3. R1 出口与限制
+
+Fake 主管可以生成 v2 计划、在人工批准前保持零 Worker 派发、批准后原子物化并支持重复点击。真实 Codex/CodeBuddy 计划生成仍需在有可用登录态的本机执行一次；当前只保留明确的“未验证”状态。R2 可在此契约基线上继续，但不能宣称真实端到端已通过。
+
 ## 5. 下一步
 
-R0 已完成，下一切片是 R1：先补角色模板与 prompt builder，再升级计划契约、格式修复、人工批准和 revision 幂等；R1 通过前不进入 R2。整体状态仍是 `stage3: checkpoint freeze personal edition baseline`，不是个人版最终验收。
+R1 已完成，下一切片是 R2：实现 Run 四区 manifest、task/attempt worktree、scratch/只读资源快照、artifact manifest 和实际 diff/write_scope 校验。整体状态仍是 `stage3: checkpoint`，不是个人版最终验收。

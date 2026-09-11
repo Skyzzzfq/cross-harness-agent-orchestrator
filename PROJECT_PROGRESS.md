@@ -1,6 +1,6 @@
 # 项目开发进度与阶段台账
 
-个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”已完成，证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；R1–R8 尚未开始。后续仍按“角色/计划 → 隔离工作区 → 移交 → 独立验证 → 消息预算 → 对话工作台 → 恢复 → 真实验收”推进。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
+个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”和 R1“角色/计划/批准”已完成，证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；R2–R8 尚未开始。后续仍按“隔离工作区 → 移交 → 独立验证 → 消息预算 → 对话工作台 → 恢复 → 真实验收”推进。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
 
 登录状态补充核验：同一项目 venv/SDK 在沙箱内无法读取 CodeBuddy 用户级认证目录，正常 Windows 用户权限下 marker=True、SDK=True。此前控制台继承沙箱限制会把“无权读取”误判成“未登录”；现已改为返回 `login_probe=unreadable` 和明确提示。已通过批准在正常权限启动 8091 控制台，真实 `/api/connections` 返回 CodeBuddy `logged_in=true`。另外，模型健康检查与真实任务都会直接发 CodeBuddy 请求：`.agent-hub/model-health.json` 最近一次记录 7 个内置模型成功，`test003` 已返回 CodeBuddy 文本并完成。因此“模型请求成功”是比认证文件探测更强的可用性证据。
 
@@ -31,8 +31,9 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | 切片 | 状态 | 证据 | 下一步 |
 |---|---|---|---|
 | R0 基线与能力 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；备份恢复通过；311/310/1 基线；Run 6 样本 | 进入 R1 |
-| R1 角色与计划 | 待开始 | — | 依赖 R0；先实现角色模板、计划 revision 与批准 |
-| R2–R8 | 待开始 | — | 依赖前一切片，禁止跳级 |
+| R1 角色与计划 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；Fake v2 计划/人工批准/幂等；全量 314/313/1 | 真实 Codex 合法计划尚未重跑；进入 R2 |
+| R2 四区与隔离 | 待开始 | — | 依赖 R1；先实现 Run manifest 与 task/attempt worktree |
+| R3–R8 | 待开始 | — | 依赖前一切片，禁止跳级 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现，WorkBuddy 确认 3 项 P0、6 项 P1 和 4 项文档问题成立后原签字撤销。随后按审计顺序完成全部 **P0（P0-01/02/03）与 MVP 必需 P1（P1-01/04/05）** 的修复并重新验收；【Beta 再补】项（P1-02/03/06）按产品口径转入阶段 3 处理，不阻塞本阶段签字。
 

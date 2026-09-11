@@ -12,6 +12,30 @@ class RoleSpec:
     version: int
     title: str
     required_capabilities: tuple[str, ...]
+    goal: str = ""
+    responsibilities: tuple[str, ...] = ()
+    forbidden_actions: tuple[str, ...] = ()
+    input_contract: tuple[str, ...] = ()
+    output_contract: tuple[str, ...] = ()
+    tool_policy: tuple[str, ...] = ()
+    context_policy: tuple[str, ...] = ()
+    budget_defaults: tuple[tuple[str, Any], ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "role_id": self.role_id,
+            "version": self.version,
+            "title": self.title,
+            "required_capabilities": list(self.required_capabilities),
+            "goal": self.goal,
+            "responsibilities": list(self.responsibilities),
+            "forbidden_actions": list(self.forbidden_actions),
+            "input_contract": list(self.input_contract),
+            "output_contract": list(self.output_contract),
+            "tool_policy": list(self.tool_policy),
+            "context_policy": list(self.context_policy),
+            "budget_defaults": {key: value for key, value in self.budget_defaults},
+        }
 
 
 @dataclass(frozen=True)
@@ -45,13 +69,10 @@ def _read_json_compatible_yaml(path: Path) -> dict[str, Any]:
 
 def load_team_spec(path: Path) -> TeamSpec:
     data = _read_json_compatible_yaml(path)
+    from orchestrator.core.role_registry import role_template_for
+
     roles = tuple(
-        RoleSpec(
-            role_id=str(item["role_id"]),
-            version=int(item["version"]),
-            title=str(item["title"]),
-            required_capabilities=tuple(item.get("required_capabilities", ())),
-        )
+        _load_role(item, role_template_for(str(item["role_id"])))
         for item in data["roles"]
     )
     pools = tuple(
@@ -78,6 +99,35 @@ def load_team_spec(path: Path) -> TeamSpec:
     )
     _validate_team_spec(spec)
     return spec
+
+
+def _load_role(item: dict[str, Any], defaults: dict[str, Any] | None) -> RoleSpec:
+    """Load a role while keeping schema-v1 team files source compatible."""
+    template = defaults or {}
+
+    def values(name: str) -> tuple[str, ...]:
+        raw = item.get(name, template.get(name, ()))
+        if isinstance(raw, str):
+            return (raw,)
+        return tuple(str(value) for value in (raw or ()))
+
+    raw_budget = item.get("budget_defaults", template.get("budget_defaults", {}))
+    if not isinstance(raw_budget, dict):
+        raise ValueError("budget_defaults must be an object")
+    return RoleSpec(
+        role_id=str(item["role_id"]),
+        version=int(item.get("version", template.get("version", 1))),
+        title=str(item.get("title", template.get("title", item["role_id"]))),
+        required_capabilities=values("required_capabilities"),
+        goal=str(item.get("goal", template.get("goal", ""))),
+        responsibilities=values("responsibilities"),
+        forbidden_actions=values("forbidden_actions"),
+        input_contract=values("input_contract"),
+        output_contract=values("output_contract"),
+        tool_policy=values("tool_policy"),
+        context_policy=values("context_policy"),
+        budget_defaults=tuple(sorted((str(key), value) for key, value in raw_budget.items())),
+    )
 
 
 def _validate_team_spec(spec: TeamSpec) -> None:

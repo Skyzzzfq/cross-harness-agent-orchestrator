@@ -26,7 +26,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from orchestrator.console.serve_manager import ServeProcessManager
-from orchestrator.core.models import AuthorityToken, ControllerToken
+from orchestrator.core.models import AuthorityToken, ControllerToken, utc_now
 from orchestrator.storage.sqlite_store import (
     FencedAuthorityError,
     FencedControllerError,
@@ -444,6 +444,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "SELECT * FROM agent_instances ORDER BY pool_id, agent_id"
                     ).fetchall()
                 )
+            elif resource == "plans":
+                payload = store.list_supervisor_plans(run_id)
             elif resource == "chat":
                 payload = self._chat_payload(run_id)
             elif resource == "worktree":
@@ -671,6 +673,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         run_id = parts[2]
         action = parts[3] if len(parts) > 3 else ""
         store = self.server.store
+        if action == "plans" and len(parts) >= 6 and parts[5] in {"approve", "reject"}:
+            self._review_plan(run_id, parts[4], parts[5], body)
+            return
         if action == "tasks" and len(parts) >= 6 and parts[5] == "cancel":
             task_id = parts[4]
             self._with_control(
@@ -762,6 +767,30 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 400, "supervisor tasks must use mode=supervisor"
             )
             return
+        if mode == "supervisor":
+            try:
+                from orchestrator.console.settings import list_saved_teams
+                from orchestrator.core.config import load_team_spec
+                from orchestrator.core.role_registry import build_supervisor_plan_prompt
+
+                run_row = self.server.store.connection.execute(
+                    "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+                selected = next(
+                    (item for item in list_saved_teams(self.server.project_root)
+                     if run_row is not None and str(item.get("team_id") or "") == str(run_row["team_id"])),
+                    None,
+                )
+                if selected and selected.get("path"):
+                    prompt = build_supervisor_plan_prompt(
+                        load_team_spec(Path(str(selected["path"]))),
+                        user_goal=prompt,
+                        budget={"max_tasks": 8, "max_worker_concurrency": 2},
+                    )
+            except Exception:
+                # Legacy or manually-created Runs can still submit a plain
+                # prompt; local validation remains authoritative.
+                pass
         try:
             self.server.store.create_task(
                 run_id,
@@ -866,6 +895,83 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         if self._with_control(run_id, run, allow_active_serve=True):
             self._send_json({"ok": True, "decision": decision})
+
+    def _review_plan(
+        self, run_id: str, supervisor_task_id: str, action: str, body: dict[str, Any]
+    ) -> None:
+        """Approve/return a persisted supervisor plan preview."""
+        try:
+            revision = int(body.get("revision"))
+        except (TypeError, ValueError):
+            self._send_error_json(400, "revision must be an integer")
+            return
+        digest = str(body.get("plan_digest") or body.get("digest") or "").strip()
+        if not digest:
+            self._send_error_json(400, "plan_digest is required")
+            return
+
+        def run(controller: Any, authority: Any) -> None:
+            if action == "approve":
+                store = self.server.store
+                store.approve_supervisor_plan(
+                    run_id,
+                    supervisor_task_id,
+                    revision,
+                    digest,
+                    controller=controller,
+                    authority=authority,
+                    permissions=body.get("permissions"),
+                )
+                # Approval and materialization share the same fencing tokens;
+                # the next serve tick remains an idempotent safety net.
+                from orchestrator.console.settings import list_saved_teams
+                from orchestrator.core.config import load_team_spec
+                from orchestrator.core.supervisor_planning import materialize_ready_supervisor_plans
+
+                run_row = store.connection.execute(
+                    "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+                if run_row is None:
+                    raise KeyError(run_id)
+                team = next(
+                    (item for item in list_saved_teams(self.server.project_root)
+                     if str(item.get("team_id") or "") == str(run_row["team_id"])),
+                    None,
+                )
+                if team is None or not team.get("path"):
+                    raise ValueError("saved team configuration is required to approve a plan")
+                spec = load_team_spec(Path(str(team["path"])))
+                materialize_ready_supervisor_plans(
+                    store,
+                    run_id=run_id,
+                    team_spec=spec,
+                    controller=controller,
+                    authority=authority,
+                )
+            else:
+                store = self.server.store
+                row = store.connection.execute(
+                    "SELECT plan_id, status, plan_digest FROM supervisor_plans "
+                    "WHERE run_id=? AND supervisor_task_id=? AND revision=?",
+                    (run_id, supervisor_task_id, revision),
+                ).fetchone()
+                if row is None:
+                    raise KeyError("plan revision not found")
+                if str(row["plan_digest"]) != digest:
+                    raise ValueError("plan digest does not match the selected revision")
+                with store.connection:
+                    store.connection.execute(
+                        "UPDATE supervisor_plans SET status='needs_revision', updated_at=? WHERE plan_id=?",
+                        (utc_now(), row["plan_id"]),
+                    )
+                    store._append_event(
+                        run_id, supervisor_task_id, None, "plan.needs_revision",
+                        "REVIEW", "REVIEW",
+                        {"revision": revision, "plan_digest": digest, "reason": str(body.get("reason") or "operator returned plan")[:500]},
+                    )
+
+        if self._with_control(run_id, run, allow_active_serve=True):
+            self._send_json({"ok": True, "run_id": run_id, "task_id": supervisor_task_id, "revision": revision, "decision": action})
 
     def _serve_action(self, run_id: str, action: str, body: dict[str, Any]) -> None:
         manager = self.server.serve_manager
@@ -979,12 +1085,49 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _create_run(self, body: dict[str, Any]) -> None:
         run_id = str(body.get("run_id") or f"run-{uuid.uuid4().hex[:12]}")
         team_id = str(body.get("team_id") or "default")
+        approval_mode = str(body.get("approval_mode") or "manual")
+        team_spec = None
         try:
-            self.server.store.create_run(run_id, team_id)
+            from orchestrator.console.settings import list_saved_teams
+            from orchestrator.core.config import load_team_spec
+
+            requested_path = str(body.get("team_path") or "").strip()
+            selected = None
+            teams = list_saved_teams(self.server.project_root)
+            if requested_path:
+                selected_path = Path(requested_path)
+                if not selected_path.is_absolute():
+                    selected_path = self.server.project_root / selected_path
+                team_spec = load_team_spec(selected_path)
+            else:
+                selected = next(
+                    (item for item in teams if str(item.get("team_id") or "") == team_id),
+                    None,
+                )
+                if selected is None and team_id == "default":
+                    selected = next(
+                        (item for item in teams if item.get("source") != "saved"), None
+                    )
+                if selected and selected.get("path"):
+                    team_spec = load_team_spec(Path(str(selected["path"])))
+            if team_spec is not None:
+                team_id = str(team_spec.team_id)
+        except Exception as exc:  # noqa: BLE001 - team snapshots are optional for legacy callers
+            if body.get("team_path"):
+                self._send_error_json(400, f"{type(exc).__name__}: invalid team")
+                return
+        try:
+            self.server.store.create_run(
+                run_id,
+                team_id,
+                team_spec=team_spec,
+                approval_mode=approval_mode,
+            )
         except Exception as exc:  # noqa: BLE001
             self._send_error_json(409, f"{type(exc).__name__}: {exc}")
             return
-        self._send_json({"ok": True, "run_id": run_id})
+        snapshot = self.server.store.run_snapshot(run_id)
+        self._send_json({"ok": True, "run_id": run_id, "team_id": team_id, **(snapshot or {})})
 
     # -- 静态页 -------------------------------------------------------------
 

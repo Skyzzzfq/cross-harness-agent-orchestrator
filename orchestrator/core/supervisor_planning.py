@@ -41,7 +41,16 @@ def materialize_ready_supervisor_plans(
         for pool in team_spec.agent_pools
         if str(pool.role_id) in child_roles
     )
-    max_tasks = max(1, max_tasks)
+    worker_slots = max(1, max_tasks)
+    # A slot is a concurrency limit, not a task-count limit.  The bounded
+    # default allows sequential work to be planned without permitting an
+    # unbounded supervisor fan-out.
+    max_tasks = max(1, worker_slots * 4)
+    model_pairs = {
+        (str(pool.role_id), str(pool.backend), str(pool.model))
+        for pool in team_spec.agent_pools
+        if pool.model
+    }
     rows = store.connection.execute(
         """
         SELECT t.task_id, d.cwd
@@ -56,8 +65,6 @@ def materialize_ready_supervisor_plans(
     results: list[dict[str, Any]] = []
     for row in rows:
         supervisor_task_id = str(row["task_id"])
-        if _already_processed(store, run_id, supervisor_task_id):
-            continue
         call = store.connection.execute(
             """
             SELECT call_id, result_json, state, disposition
@@ -71,6 +78,12 @@ def materialize_ready_supervisor_plans(
             continue
         call_id = str(call["call_id"])
         if call["disposition"] != "submitted":
+            continue
+        latest_plan = store.latest_supervisor_plan(run_id, supervisor_task_id)
+        if (
+            latest_plan is None
+            or str(latest_plan.get("status")) not in {"approved", "executing", "verifying", "delivered"}
+        ) and _already_processed(store, run_id, supervisor_task_id, call_id):
             continue
         try:
             payload = _extract_plan_payload(call["result_json"])
@@ -88,22 +101,57 @@ def materialize_ready_supervisor_plans(
                 role_backend_pairs=pairs,
                 max_tasks=max_tasks,
                 existing_task_ids=existing_ids,
+                role_model_pairs=model_pairs,
+                max_worker_concurrency=worker_slots,
             )
-            materialized = store.materialize_supervisor_plan(
-                run_id,
-                supervisor_task_id,
-                plan,
-                controller=controller,
-                authority=authority,
-                worker_cwd=worker_cwd or str(row["cwd"]),
-            )
-            results.append(
-                {
-                    "supervisor_task_id": supervisor_task_id,
-                    "call_id": call_id,
-                    **materialized,
-                }
-            )
+            latest = store.latest_supervisor_plan(run_id, supervisor_task_id)
+            approval_mode = store.run_approval_mode(run_id)
+            if approval_mode == "manual":
+                if latest is not None and latest.get("plan_digest") == plan.digest:
+                    if latest.get("status") in {"approved", "executing", "verifying", "delivered"}:
+                        materialized = store.materialize_supervisor_plan(
+                            run_id,
+                            supervisor_task_id,
+                            plan,
+                            controller=controller,
+                            authority=authority,
+                            worker_cwd=worker_cwd or str(row["cwd"]),
+                        )
+                        results.append({"supervisor_task_id": supervisor_task_id, "call_id": call_id, **materialized})
+                    continue
+                preview = store.save_supervisor_plan(
+                    run_id,
+                    supervisor_task_id,
+                    plan,
+                    call_id=call_id,
+                    status="pending_approval",
+                )
+                results.append(
+                    {
+                        "supervisor_task_id": supervisor_task_id,
+                        "call_id": call_id,
+                        "status": "pending_approval",
+                        "revision": plan.revision,
+                        "plan_digest": plan.digest,
+                        "preview": json.loads(str(preview["plan_json"])),
+                    }
+                )
+            else:
+                materialized = store.materialize_supervisor_plan(
+                    run_id,
+                    supervisor_task_id,
+                    plan,
+                    controller=controller,
+                    authority=authority,
+                    worker_cwd=worker_cwd or str(row["cwd"]),
+                )
+                results.append(
+                    {
+                        "supervisor_task_id": supervisor_task_id,
+                        "call_id": call_id,
+                        **materialized,
+                    }
+                )
         except (PlanValidationError, ValueError, KeyError) as exc:
             reason = redact_sensitive(f"{type(exc).__name__}: {exc}")
             store.record_supervisor_plan_rejection(
@@ -114,12 +162,42 @@ def materialize_ready_supervisor_plans(
                 controller=controller,
                 authority=authority,
             )
+            prior_rejections = store.connection.execute(
+                "SELECT COUNT(*) FROM events WHERE run_id=? AND task_id=? "
+                "AND kind='plan.rejected'",
+                (run_id, supervisor_task_id),
+            ).fetchone()[0]
+            repair_scheduled = False
+            if int(prior_rejections) <= 1:
+                # One bounded format repair gets a fresh backend call and
+                # attempt; the original failure remains in the event log.
+                try:
+                    store.reassign_task(
+                        run_id,
+                        supervisor_task_id,
+                        controller,
+                        authority,
+                        reason="supervisor-plan-format-repair",
+                    )
+                    repair_scheduled = True
+                except ValueError:
+                    repair_scheduled = False
+            else:
+                store.record_supervisor_plan_needs_input(
+                    run_id,
+                    supervisor_task_id,
+                    call_id=call_id,
+                    reason=reason,
+                    controller=controller,
+                    authority=authority,
+                )
             results.append(
                 {
                     "supervisor_task_id": supervisor_task_id,
                     "call_id": call_id,
                     "status": "rejected",
                     "reason": reason,
+                    "repair_scheduled": repair_scheduled,
                 }
             )
         except (FencedControllerError, FencedAuthorityError):
@@ -128,16 +206,20 @@ def materialize_ready_supervisor_plans(
 
 
 def _already_processed(
-    store: SQLiteStateStore, run_id: str, supervisor_task_id: str
+    store: SQLiteStateStore, run_id: str, supervisor_task_id: str, call_id: str
 ) -> bool:
     row = store.connection.execute(
         """
         SELECT 1 FROM events
         WHERE run_id = ? AND task_id = ?
-          AND kind IN ('plan.materialized', 'plan.rejected')
+          AND (
+              kind = 'plan.materialized'
+              OR (kind IN ('plan.rejected', 'plan.pending', 'plan.needs_input')
+                  AND json_extract(data_json, '$.call_id') = ?)
+          )
         LIMIT 1
         """,
-        (run_id, supervisor_task_id),
+        (run_id, supervisor_task_id, call_id),
     ).fetchone()
     return row is not None
 

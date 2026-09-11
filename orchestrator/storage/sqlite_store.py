@@ -143,7 +143,7 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 15
+CURRENT_SCHEMA_VERSION = 16
 
 
 class SQLiteStateStore:
@@ -175,14 +175,245 @@ class SQLiteStateStore:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def create_run(self, run_id: str, team_id: str) -> None:
+    def create_run(
+        self,
+        run_id: str,
+        team_id: str,
+        *,
+        team_spec: Any | None = None,
+        approval_mode: str = "auto",
+    ) -> None:
+        if approval_mode not in {"auto", "manual"}:
+            raise ValueError("approval_mode must be auto or manual")
+        snapshot_json = None
+        snapshot_digest = None
+        if team_spec is not None:
+            from orchestrator.core.role_registry import (
+                snapshot_digest as calculate_snapshot_digest,
+                team_snapshot,
+            )
+
+            snapshot = team_snapshot(team_spec)
+            snapshot_json = json.dumps(
+                snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+            snapshot_digest = calculate_snapshot_digest(snapshot)
         now = utc_now()
         with self.connection:
             self.connection.execute(
-                "INSERT INTO runs(run_id, team_id, created_at) VALUES (?, ?, ?)",
-                (run_id, team_id, now),
+                """
+                INSERT INTO runs(
+                    run_id, team_id, created_at, team_snapshot_json,
+                    team_snapshot_digest, approval_mode
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, team_id, now, snapshot_json, snapshot_digest, approval_mode),
             )
             self._append_event(run_id, None, None, "run.created", None, None, {})
+
+    def run_approval_mode(self, run_id: str) -> str:
+        row = self.connection.execute(
+            "SELECT approval_mode FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        return str(row["approval_mode"] or "auto")
+
+    def run_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT team_snapshot_json, team_snapshot_digest, approval_mode "
+            "FROM runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        snapshot = None
+        if row["team_snapshot_json"]:
+            snapshot = json.loads(str(row["team_snapshot_json"]))
+        return {
+            "snapshot": snapshot,
+            "digest": row["team_snapshot_digest"],
+            "approval_mode": str(row["approval_mode"] or "auto"),
+        }
+
+    def save_supervisor_plan(
+        self,
+        run_id: str,
+        supervisor_task_id: str,
+        plan: Any,
+        *,
+        call_id: str | None = None,
+        status: str = "pending_approval",
+        format_repair_count: int = 0,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist one immutable plan revision and return its preview."""
+        if status not in {
+            "generating",
+            "pending_approval",
+            "approved",
+            "executing",
+            "verifying",
+            "delivered",
+            "format_failed",
+            "needs_revision",
+            "cancelled",
+        }:
+            raise ValueError(f"unsupported supervisor plan status: {status}")
+        now = utc_now()
+        revision = int(getattr(plan, "revision", 1))
+        plan_json = json.dumps(
+            _jsonable(plan.to_dict() if hasattr(plan, "to_dict") else plan),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        permissions_json = json.dumps(
+            _jsonable(getattr(plan, "permissions", None)),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        budget_json = json.dumps(
+            _jsonable(getattr(plan, "budget", None)),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = str(getattr(plan, "digest", ""))
+        with self.connection:
+            existing = self.connection.execute(
+                "SELECT * FROM supervisor_plans WHERE run_id=? AND supervisor_task_id=? AND revision=?",
+                (run_id, supervisor_task_id, revision),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+            plan_id = f"plan-{uuid.uuid4().hex[:16]}"
+            self.connection.execute(
+                """
+                INSERT INTO supervisor_plans(
+                    plan_id, run_id, supervisor_task_id, revision, status,
+                    plan_json, plan_digest, permissions_json, budget_json,
+                    worker_concurrency, format_repair_count, source_call_id,
+                    error_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan_id,
+                    run_id,
+                    supervisor_task_id,
+                    revision,
+                    status,
+                    plan_json,
+                    digest,
+                    permissions_json,
+                    budget_json,
+                    int(getattr(plan, "worker_concurrency", 1)),
+                    int(format_repair_count),
+                    call_id,
+                    json.dumps({"reason": error}, ensure_ascii=False) if error else None,
+                    now,
+                    now,
+                ),
+            )
+            self._append_event(
+                run_id,
+                supervisor_task_id,
+                None,
+                "plan.pending" if status == "pending_approval" else f"plan.{status}",
+                TaskState.REVIEW.value,
+                TaskState.REVIEW.value,
+                {
+                    "call_id": call_id,
+                    "revision": revision,
+                    "plan_digest": digest,
+                    "status": status,
+                },
+            )
+            return dict(
+                self.connection.execute(
+                    "SELECT * FROM supervisor_plans WHERE plan_id=?", (plan_id,)
+                ).fetchone()
+            )
+
+    def latest_supervisor_plan(
+        self, run_id: str, supervisor_task_id: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM supervisor_plans WHERE run_id=? AND supervisor_task_id=? "
+            "ORDER BY revision DESC LIMIT 1",
+            (run_id, supervisor_task_id),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def list_supervisor_plans(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM supervisor_plans WHERE run_id=? ORDER BY revision, plan_id",
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def approve_supervisor_plan(
+        self,
+        run_id: str,
+        supervisor_task_id: str,
+        revision: int,
+        plan_digest: str,
+        *,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+        permissions: Any = None,
+    ) -> dict[str, Any]:
+        """Atomically approve a plan revision; repeating the same approval is safe."""
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            row = self.connection.execute(
+                "SELECT * FROM supervisor_plans WHERE run_id=? AND supervisor_task_id=? AND revision=?",
+                (run_id, supervisor_task_id, int(revision)),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"plan revision {revision} not found")
+            if str(row["plan_digest"]) != str(plan_digest):
+                raise ValueError("plan digest does not match the selected revision")
+            if permissions is not None:
+                expected = json.loads(row["permissions_json"] or "null")
+                if _jsonable(permissions) != expected:
+                    raise ValueError("plan permissions do not match the selected revision")
+            current = str(row["status"])
+            if current in {"approved", "executing", "verifying", "delivered"}:
+                self.connection.commit()
+                return dict(row)
+            if current != "pending_approval":
+                raise ValueError(f"plan is {current}, must be pending_approval")
+            self.connection.execute(
+                "UPDATE supervisor_plans SET status='approved', updated_at=? WHERE plan_id=?",
+                (now, row["plan_id"]),
+            )
+            self._append_event(
+                run_id,
+                supervisor_task_id,
+                None,
+                "plan.approved",
+                TaskState.REVIEW.value,
+                TaskState.REVIEW.value,
+                {
+                    "revision": int(revision),
+                    "plan_digest": str(plan_digest),
+                    "controller_epoch": controller.epoch,
+                    "authority_epoch": authority.epoch,
+                },
+            )
+            updated = self.connection.execute(
+                "SELECT * FROM supervisor_plans WHERE plan_id=?", (row["plan_id"],)
+            ).fetchone()
+            self.connection.commit()
+            return dict(updated)
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def acquire_run_controller(
         self,
@@ -405,7 +636,8 @@ class SQLiteStateStore:
                         "max_attempts": max_attempts,
                         "required_role_id": task.role_id,
                         "required_backend": task.backend,
-                        "required_model": None,
+                        "required_model": getattr(task, "required_model", None),
+                        "required_provider_id": getattr(task, "required_provider_id", None),
                         "prompt": task.prompt,
                         "cwd": task_cwd,
                         "timeout_seconds": timeout_seconds,
@@ -477,6 +709,14 @@ class SQLiteStateStore:
                     "authority_epoch": authority.epoch,
                 },
             )
+            self.connection.execute(
+                """
+                UPDATE supervisor_plans
+                SET status='executing', updated_at=?
+                WHERE run_id=? AND supervisor_task_id=? AND revision=?
+                """,
+                (now, run_id, supervisor_task_id, int(getattr(plan, "revision", 1))),
+            )
             self.connection.commit()
             return {
                 "status": "materialized",
@@ -533,6 +773,36 @@ class SQLiteStateStore:
             )
             self.connection.commit()
             return True
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def record_supervisor_plan_needs_input(
+        self,
+        run_id: str,
+        supervisor_task_id: str,
+        *,
+        call_id: str,
+        reason: str,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+    ) -> None:
+        """Stop after the single format repair and leave the parent actionable."""
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            self._append_event(
+                run_id,
+                supervisor_task_id,
+                None,
+                "plan.needs_input",
+                TaskState.REVIEW.value,
+                TaskState.REVIEW.value,
+                {"call_id": call_id, "reason": reason[:500]},
+            )
+            self.connection.commit()
         except BaseException:
             self.connection.rollback()
             raise
@@ -5478,6 +5748,8 @@ class SQLiteStateStore:
             self._migrate_to_v14()
         if version < 15:
             self._migrate_to_v15()
+        if version < 16:
+            self._migrate_to_v16()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -6025,6 +6297,49 @@ class SQLiteStateStore:
                 "ON task_dispatch_specs(required_provider_id)"
             )
             self.connection.execute("PRAGMA user_version=15")
+
+    def _migrate_to_v16(self) -> None:
+        """Freeze Run team snapshots and persist supervisor plan revisions."""
+        with self.connection:
+            run_columns = {
+                row["name"] for row in self.connection.execute("PRAGMA table_info(runs)")
+            }
+            for name, declaration in (
+                ("team_snapshot_json", "TEXT"),
+                ("team_snapshot_digest", "TEXT"),
+                ("approval_mode", "TEXT NOT NULL DEFAULT 'auto'"),
+            ):
+                if name not in run_columns:
+                    self.connection.execute(
+                        f"ALTER TABLE runs ADD COLUMN {name} {declaration}"
+                    )
+            self.connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS supervisor_plans (
+                    plan_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    supervisor_task_id TEXT NOT NULL REFERENCES tasks(task_id),
+                    revision INTEGER NOT NULL CHECK(revision > 0),
+                    status TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    plan_digest TEXT NOT NULL,
+                    permissions_json TEXT,
+                    budget_json TEXT,
+                    worker_concurrency INTEGER NOT NULL CHECK(worker_concurrency > 0),
+                    format_repair_count INTEGER NOT NULL DEFAULT 0,
+                    source_call_id TEXT,
+                    error_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(run_id, supervisor_task_id, revision)
+                )
+                """
+            )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_supervisor_plans_run "
+                "ON supervisor_plans(run_id, supervisor_task_id, revision)"
+            )
+            self.connection.execute("PRAGMA user_version=16")
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(
