@@ -15,6 +15,8 @@ from orchestrator.poc.git_demo import run_git_demo
 from orchestrator.poc.recovery_demo import run_recovery_demo
 from orchestrator.poc.real_demo import run_real_demo
 from orchestrator.poc.stage2_real import run_mixed_parallel, run_stage2_real
+from orchestrator.history import history_cleanup_preview
+from orchestrator.recovery import run_recovery_check
 from orchestrator.reconciler import run_reconciler_once
 from orchestrator.serve import serve
 from orchestrator.adapters.codebuddy_spike import run_codebuddy_session_spike
@@ -74,6 +76,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     reconcile.add_argument("--limit", type=int, default=100)
     reconcile.add_argument("--run", dest="run_id")
+    recovery_check = subcommands.add_parser(
+        "recovery-check", help="inspect restart recovery state without changing it"
+    )
+    recovery_check.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    recovery_check.add_argument("--run", dest="run_id")
+    history_preview = subcommands.add_parser(
+        "history-preview", help="preview safe history cleanup candidates"
+    )
+    history_preview.add_argument(
+        "--db", type=Path, default=Path(".agent-hub/state/agent-hub.db")
+    )
+    history_preview.add_argument("--run", dest="run_id")
+    history_preview.add_argument("--older-than-days", type=int, default=30)
     serve_parser = subcommands.add_parser(
         "serve", help="run the resident background loop for one Run"
     )
@@ -441,6 +458,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "ready" else 1
+    if args.command == "recovery-check":
+        result = run_recovery_check(
+            Path.cwd(), database_path=args.db, run_id=args.run_id
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "history-preview":
+        db = _resolve_db(Path.cwd(), args.db)
+        with SQLiteStateStore(db) as store:
+            result = history_cleanup_preview(
+                store,
+                older_than_days=args.older_than_days,
+                run_id=args.run_id,
+            )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "serve":
         result = _run_serve(
             Path.cwd(),

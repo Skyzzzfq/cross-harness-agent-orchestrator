@@ -1,17 +1,17 @@
 # 项目开发进度与阶段台账
 
-个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”、R1“角色/计划/批准”、R2“四区/任务尝试隔离”、R3“移交/结果回收/父任务聚合”、R4“独立验证/返工/Git 交付”、R5“消息/取消/预算”已完成，R6“项目—角色—Agent 对话工作台”已完成本地 checkpoint 切片，证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；R7–R8 尚未开始。后续仍按“恢复 → 真实验收”推进。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
+个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”、R1“角色/计划/批准”、R2“四区/任务尝试隔离”、R3“移交/结果回收/父任务聚合”、R4“独立验证/返工/Git 交付”、R5“消息/取消/预算”、R6“项目—角色—Agent 对话工作台”和 R7“恢复/迁移/个人版文档”已完成，证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；R8 真实验收尚未开始。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
 
 登录状态补充核验：同一项目 venv/SDK 在沙箱内无法读取 CodeBuddy 用户级认证目录，正常 Windows 用户权限下 marker=True、SDK=True。此前控制台继承沙箱限制会把“无权读取”误判成“未登录”；现已改为返回 `login_probe=unreadable` 和明确提示。已通过批准在正常权限启动 8091 控制台，真实 `/api/connections` 返回 CodeBuddy `logged_in=true`。另外，模型健康检查与真实任务都会直接发 CodeBuddy 请求：`.agent-hub/model-health.json` 最近一次记录 7 个内置模型成功，`test003` 已返回 CodeBuddy 文本并完成。因此“模型请求成功”是比认证文件探测更强的可用性证据。
 
-最新测试结果：335 项，334 通过、1 跳过（R6 项目/对话/引导回归及既有 R5 durable delivery、取消确认、心跳 fencing）；以下旧切片测试数字为历史记录。
+最新测试结果：340 项，339 通过、1 跳过（R7 恢复/历史预览回归及 R6/R5 与既有测试）；以下旧切片测试数字为历史记录。
 
 最新授权修复：CodeBuddy 网页入口改为内存中的 starting / waiting / completed / failed 状态；授权链接交给前端打开并提供可点击回退入口，终态清除链接，不写入日志。8090 实测接口进入 waiting；人工登录回调尚待验收。此前仅凭进程存活宣称授权页已打开的结论不成立。
 
 更新时间：2026-09-11
 GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 审计基线远端 main：87b875e；整改后当前远端 main 以 `git log` 为准
-当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；R6 对话工作台已提交为 `stage3: checkpoint project agent conversation workspace`，当前仍需 R7 恢复演练和 R8 真实端到端验收。**
+当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；R6 对话工作台和 R7 恢复/文档已分别提交，当前只剩 R8 真实端到端验收。**
 
 对话工作台实现与限制见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`：项目→角色→Agent 树、独立上下文、事件 cursor、用户引导 durable 队列已接通；真实后端活动插话和跨 workspace 热切换仍不宣称已支持。
 
@@ -37,7 +37,8 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | R4 验证与交付 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；schema v19 固定检查/evidence-bound 审核/两轮返工；全量 324/323/1 | 真实后端独立审核未验证；进入 R5 |
 | R5 消息与预算 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；schema v20 durable delivery/取消确认/进度心跳/预算 reservation；全量 331/330/1 | 真实后端即时引导与取消确认未验证；进入 R6 |
 | R6 对话工作台 | **checkpoint（切片完成）** | `stage3: checkpoint project agent conversation workspace`；项目 API、角色/Agent 树、cursor/events、引导队列；全量 335/334/1 | 真实活动插话、跨 workspace 热切换和完整浏览器端到端未验证；进入 R7 |
-| R7–R8 | 待开始 | — | 依赖 R6；先完成恢复/文档再做真实验收 |
+| R7 恢复与文档 | **完成** | `stage3: checkpoint recovery and personal edition documentation`；recovery-check、history-preview、reconcile 恢复演练、启动/端口/备份文档；全量 340/339/1 | 不自动删除历史；后端停止确认与 R8 真实场景仍未验证 |
+| R8 真实验收 | 待开始 | — | 依赖 R7，必须使用真实后端和固定样例项目 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现，WorkBuddy 确认 3 项 P0、6 项 P1 和 4 项文档问题成立后原签字撤销。随后按审计顺序完成全部 **P0（P0-01/02/03）与 MVP 必需 P1（P1-01/04/05）** 的修复并重新验收；【Beta 再补】项（P1-02/03/06）按产品口径转入阶段 3 处理，不阻塞本阶段签字。
 

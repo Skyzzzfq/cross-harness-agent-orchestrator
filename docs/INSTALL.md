@@ -39,23 +39,25 @@ python scripts\bootstrap.py --root .
 & '.venv\Scripts\python.exe' -m orchestrator init
 ```
 
-加载 `config/team.yaml` 并创建 `agent-hub.db`（schema v12）。
+加载 `config/team.yaml` 并创建 `.agent-hub/state/agent-hub.db`；已有数据库会按编号自动迁移到当前 schema（当前为 v20），不会覆盖旧 Run 的结果。
 
 ## 步骤 4：发起一个 Run（约 3 分钟）
 
-```powershell
-# 创建 run 并常驻调度（Fake 后端可离线演示；真实后端见后）
-& '.venv\Scripts\python.exe' -m orchestrator run new --team ...   # 如支持
-& '.venv\Scripts\python.exe' -m orchestrator serve --run run-1 --backend fake
-```
+在控制台的「运行管理」中创建 Run 并点击「启动 serve」。Fake 后端可以离线演示；Codex/CodeBuddy 需要各自的登录态。
 
 ## 步骤 5：打开管理控制台（约 2 分钟，另一个终端）
 
 ```powershell
-& '.venv\Scripts\python.exe' -m orchestrator console --run run-1 --port 8080
+& '.venv\Scripts\python.exe' -m orchestrator console --run run-1 --port 8081
 ```
 
-浏览器访问 <http://127.0.0.1:8080>：
+浏览器访问命令输出的实际地址（例如 <http://127.0.0.1:8081>）。8080 常被 Steam 占用时不要终止 Steam；换用 8081 或让 `start.cmd` 自动选择空闲端口：
+
+```powershell
+.\start.cmd
+```
+
+控制台提供：
 
 - 状态页：任务时间线、审批、Merge Queue、Agent 状态。
 - 管理控制台：发起任务、取消、暂停/恢复（写操作复用 controller/authority fencing；serve 持权时自动只读）。
@@ -66,6 +68,18 @@ python scripts\bootstrap.py --root .
 & '.venv\Scripts\python.exe' -m orchestrator db-backup --db .agent-hub\state\agent-hub.db
 & '.venv\Scripts\python.exe' -m orchestrator db-verify --db .agent-hub\state\agent-hub.db
 ```
+
+发生异常退出时，先只读检查，再按需恢复：
+
+```powershell
+& '.venv\Scripts\python.exe' -m orchestrator recovery-check --run run-1
+& '.venv\Scripts\python.exe' -m orchestrator reconcile --run run-1
+& '.venv\Scripts\python.exe' -m orchestrator history-preview --older-than-days 30
+& '.venv\Scripts\python.exe' -m orchestrator db-restore --db .agent-hub\state\agent-hub.db --backup <backup-file>
+& '.venv\Scripts\python.exe' -m orchestrator db-verify --db .agent-hub\state\agent-hub.db
+```
+
+`recovery-check` 只读列出活动任务、过期租约、未确认调用、消息投递和预算预留；`reconcile` 才会按 generation/租约条件回收过期尝试。`history-preview` 只生成清理候选预览，当前版本不会删除 Run、审计事件、产物或证据。
 
 ## 真实后端切换（可选）
 

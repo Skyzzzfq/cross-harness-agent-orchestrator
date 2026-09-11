@@ -281,6 +281,34 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 
 项目选择当前保存的是受校验的元数据；正在运行的控制台不会在浏览器内热切换根目录，切换 workspace 仍需从目标目录重新启动控制台。游标接口返回事件增量，但当前页面为安全起见仍回放选中任务的持久上下文，不伪造流式工具轨迹。Codex 活动 `steer`、CodeBuddy 即时插话和取消确认仍以 R0/R5 能力表为准，尚无本轮真实后端证据；本切片只保证引导意图不丢失、目标 attempt 不错配。
 
+## R7：恢复、迁移与个人版发布准备
+
+更新时间：2026-09-11
+状态：**R7 已完成（恢复检查、回收演练、历史清理预览和启动排障文档通过）；R8 真实后端端到端验收仍待执行。**
+
+### 1. 已实现
+
+- 新增 `orchestrator.recovery.recovery_snapshot` 和 `recovery-check` CLI。检查只读汇总 Run controller/authority、活动任务、过期 assignment lease、未确认 backend call、消息投递、预算 reservation、Merge Queue 和 Outbox，不代替带 fencing 的 `reconcile`。
+- 控制台新增 `/api/recovery`；重启后可先在浏览器查看恢复阻塞项，再决定是否执行已有协调命令。
+- 新增 `orchestrator.history.history_cleanup_preview`、`history-preview` CLI 和 `/api/history/preview`。仅当 Run 超过保留期限且没有活动任务时标为候选；当前版本不删除 Run、审计事件、产物、证据或用户工作区。
+- 更新 `docs/INSTALL.md`、`docs/CONSOLE_GUIDE.md` 和 `README.md`：明确当前 schema 自动迁移、备份/恢复顺序、Steam 占用 8080 时使用 8081 或 `start.cmd` 自动选端口、重启排障和清理预览边界。
+
+### 2. R7 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 只读恢复检查发现过期 attempt 且不改数据库 | PASS | `tests/test_personal_r7.py::test_recovery_snapshot_is_read_only_and_reports_expired_attempt` |
+| 过期 attempt 只被回收一次 | PASS | `tests/test_personal_r7.py::test_reconciler_recovers_expired_attempt_once` |
+| 恢复检查报告落盘且不含凭据字段 | PASS | `tests/test_personal_r7.py::test_recovery_check_writes_credential_free_report` |
+| 历史清理预览阻止活动 Run、保留证据计数 | PASS | `tests/test_personal_r7.py::test_history_preview_blocks_active_runs_and_marks_empty_old_run` |
+| 控制台恢复/历史接口 | PASS | `tests/test_personal_r7.py::test_console_exposes_recovery_and_history_preview` |
+| 数据库备份/恢复/完整性与历史迁移回归 | PASS | `tests/test_stage3_db_ops.py` 及既有 schema migration tests |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；340 项，339 通过、1 跳过 |
+
+### 3. R7 限制
+
+恢复检查不会猜测后端进程是否已经停止；未确认的 CodeBuddy 取消仍由 R5 语义保留资源。历史预览没有自动归档或删除动作，避免误删个人项目的审计链和证据。R8 必须在可用账号环境中执行真实主管、双 Worker、独立审核、引导和重启场景。
+
 ## 5. 下一步
 
-R6 已提交为对话工作台 checkpoint；下一切片是 R7：升级/恢复演练、历史归档清理预览、启动与故障排查文档。R8 仍需真实后端端到端验收，不能用 Fake 或 API 单测替代。
+R7 已提交；下一切片是 R8：固定小型样例项目，执行真实主管 + 双 Worker、独立审核/返工、重启/取消、引导和预算上限验收。Fake 或 API 单测不能替代真实端到端证据。

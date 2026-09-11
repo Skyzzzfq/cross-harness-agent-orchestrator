@@ -2,7 +2,7 @@
 
 这是一个本地多 Agent 编排器，目标是让 Codex 与 CodeBuddy/WorkBuddy 在同一项目中承担可配置的主管、执行和审核职位。
 
-当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3（Beta）历史签字完成，目前在其基础上推进主管任务入口与模型选择，状态为 `stage3: checkpoint supervisor entry`。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径）；Beta 再补项 B1–B3（金额预算、审批原子消费、Outbox 重试）已在本阶段内完成。阶段 3 退出条件 E1–E7 PASS，E8（30 分钟干净 Windows 安装演示）经决策跳过（开发自用），当前全量 301 项测试通过。阶段 3 已具备真实账号证据：E2 真实 20 场景 20/20、E3 真实 drain 孤儿进程/worktree/锁为 0、E5 codex 真实注入语料 4/4 违规 0。
+当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3 Beta 历史签字完成，R0–R5 已完成，R6 对话工作台 checkpoint 已提交，当前进入 R7 恢复与个人版文档。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径）；Beta 再补项 B1–B3（金额预算、审批原子消费、Outbox 重试）已在本阶段内完成。阶段 3 退出条件 E1–E7 PASS，E8（30 分钟干净 Windows 安装演示）经决策跳过（开发自用）。当前全量 **335 项，334 通过、1 跳过**；R8 真实端到端验收仍未完成。
 
 当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。开发纪律见 [AGENTS.md](AGENTS.md)，安装与 30 分钟演示见 [docs/INSTALL.md](docs/INSTALL.md)，审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。
 
@@ -32,7 +32,9 @@
 .\.venv\Scripts\python.exe -m orchestrator status
 .\.venv\Scripts\python.exe -m orchestrator status --run <run-id>
 .\.venv\Scripts\python.exe -m orchestrator reconcile --run <run-id>
-.\.venv\Scripts\python.exe -m orchestrator console --run <run-id>   # 网页控制台（http://127.0.0.1:8080）
+.\.venv\Scripts\python.exe -m orchestrator recovery-check --run <run-id>  # 只读恢复检查
+.\.venv\Scripts\python.exe -m orchestrator history-preview --older-than-days 30
+.\.venv\Scripts\python.exe -m orchestrator console --run <run-id> --port 8081   # 8080 被 Steam 占用时使用 8081
 .\.venv\Scripts\python.exe -m orchestrator serve-team --run <run-id> --team <team名>   # 按 team 常驻调度
 .\.venv\Scripts\python.exe -m orchestrator demo --fake
 .\.venv\Scripts\python.exe -m orchestrator demo --git-fake
@@ -78,9 +80,9 @@
 >
 > 浏览器登录态不会自动共享给独立 SDK；首次使用先执行 `orchestrator auth codex` 与 `orchestrator auth codebuddy`（见下）。
 
-`init` 会校验 [团队配置](config/team.yaml)，并把运行状态初始化到 `.agent-hub/state/agent-hub.db`。配置文件采用 JSON-compatible YAML 1.2，以便编排核心继续只依赖 Python 标准库。
+`init` 会校验 [团队配置](config/team.yaml)，并把运行状态初始化到 `.agent-hub/state/agent-hub.db`；已有数据库按编号自动迁移到当前 schema，不改写历史 Run。配置文件采用 JSON-compatible YAML 1.2，以便编排核心继续只依赖 Python 标准库。
 
-`status --run` 提供隔离的单 Run 只读汇总；`reconcile` 执行一次显式状态协调，只回收已过期且仍为 ACTIVE 的 Assignment Lease。恢复时会再次按 generation、状态和同一 cutoff 做条件更新，避免扫描后 Worker 已续租却被误回收。当前已有后台常驻控制循环，但 CLI `serve` 仍只注册 Fake Adapter，真实 Adapter、Review、Git Merge 和 Outbox 尚未接入同一常驻闭环。
+`status --run` 提供隔离的单 Run 只读汇总；`recovery-check` 只读检查控制器/主管租约、活动任务、过期 Assignment Lease、未确认后端调用、消息投递和预算预留；`reconcile` 执行一次显式状态协调，只回收已过期且仍为 ACTIVE 的 Assignment Lease。恢复时会再次按 generation、状态和同一 cutoff 做条件更新，避免扫描后 Worker 已续租却被误回收。`history-preview` 只列出满足时间和终态条件的历史 Run，不执行删除。
 
 `demo --fake` 不调用在线模型，用于验证两个 Worker 的并行、Reviewer 驳回和新 Attempt 返工。运行报告写入 `.agent-hub/reports/`。
 

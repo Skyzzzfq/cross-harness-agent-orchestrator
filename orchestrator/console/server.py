@@ -98,6 +98,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/projects":
             self._get_projects()
             return
+        if path == "/api/recovery":
+            self._get_recovery(parse_qs(parsed.query))
+            return
+        if path == "/api/history/preview":
+            self._get_history_preview(parse_qs(parsed.query))
+            return
         if path == "/api/model-catalog":
             self._get_model_catalog(parse_qs(parsed.query))
             return
@@ -248,6 +254,30 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         from orchestrator.console.settings import list_projects
 
         self._send_json({"projects": list_projects(self.server.project_root)})
+
+    def _get_recovery(self, query: dict[str, list[str]]) -> None:
+        from orchestrator.recovery import recovery_snapshot
+
+        run_id = str((query.get("run_id") or [""])[0] or "").strip() or None
+        self._send_json(recovery_snapshot(self.server.store, run_id=run_id))
+
+    def _get_history_preview(self, query: dict[str, list[str]]) -> None:
+        from orchestrator.history import history_cleanup_preview
+
+        try:
+            days = int((query.get("older_than_days") or ["30"])[0] or 30)
+        except ValueError:
+            self._send_error_json(400, "older_than_days must be an integer")
+            return
+        run_id = str((query.get("run_id") or [""])[0] or "").strip() or None
+        try:
+            payload = history_cleanup_preview(
+                self.server.store, older_than_days=days, run_id=run_id
+            )
+        except ValueError as exc:
+            self._send_error_json(400, str(exc))
+            return
+        self._send_json(payload)
 
     def _save_project(self, body: dict[str, Any]) -> None:
         from orchestrator.console.settings import save_project
