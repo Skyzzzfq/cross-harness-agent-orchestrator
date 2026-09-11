@@ -129,6 +129,31 @@ def _worker_calls(report: dict[str, Any]) -> list[dict[str, Any]]:
     return calls
 
 
+def _has_supervisor_summary(report: dict[str, Any]) -> bool:
+    summary = report.get("evidence", {}).get("supervisor_summary")
+    if not isinstance(summary, dict):
+        return False
+    refs = summary.get("result_refs") or summary.get("worker_result_refs")
+    return isinstance(refs, list) and len(refs) >= 2
+
+
+def _has_independent_reviewer(report: dict[str, Any]) -> bool:
+    evidence = report.get("evidence", {})
+    supervisor_thread = evidence.get("codex", {}).get("thread_id")
+    reviews = evidence.get("reviews", {})
+    if not isinstance(reviews, dict) or not supervisor_thread:
+        return False
+    reviewer_sessions = {
+        str(item.get("reviewer_session_id"))
+        for item in reviews.values()
+        if isinstance(item, dict) and item.get("reviewer_session_id")
+    }
+    return bool(reviewer_sessions) and all(
+        reviewer_session != str(supervisor_thread)
+        for reviewer_session in reviewer_sessions
+    )
+
+
 def _failure_summary(path: Path, report: dict[str, Any]) -> dict[str, Any]:
     failure = report.get("evidence", {}).get("failure")
     if not isinstance(failure, dict):
@@ -170,6 +195,16 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
             failures.append(_failure_summary(path, report))
 
     refs = [_relative_ref(path) for path, _ in successful]
+    supervisor_success = [
+        (path, report) for path, report in successful if _has_supervisor_summary(report)
+    ]
+    independent_review_success = [
+        (path, report)
+        for path, report in successful
+        if _has_independent_reviewer(report)
+    ]
+    supervisor_refs = [_relative_ref(path) for path, _ in supervisor_success]
+    reviewer_refs = [_relative_ref(path) for path, _ in independent_review_success]
     a_calls = [call for _, report in successful for call in _worker_calls(report)]
     sessions = sorted(
         {
@@ -195,7 +230,7 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
     b_commits = all(_distinct_commits(report) for _, report in successful)
     d_defect = all(
         report.get("checks", {}).get("review_b1_requested_rework") is True
-        for _, report in successful
+        for _, report in independent_review_success
     )
     d_rework = [
         {
@@ -206,7 +241,7 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
             .get("worker-b-attempt-2", {})
             .get("session_id"),
         }
-        for _, report in successful
+        for _, report in independent_review_success
     ]
     d_final = [
         {
@@ -219,9 +254,22 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
             .get("git", {})
             .get("worker_b_accepted_commit"),
         }
-        for _, report in successful
+        for _, report in independent_review_success
     ]
     repetitions = len(successful)
+    d_scenario: dict[str, Any] = {
+        "repetitions": len(independent_review_success),
+        "evidence_refs": reviewer_refs,
+    }
+    if independent_review_success:
+        d_scenario.update(
+            {
+                "reviewer_detected_defect": d_defect,
+                "rework_attempt": d_rework,
+                "post_rework_verification": d_final,
+            }
+        )
+
     return {
         "format_version": FORMAT_VERSION,
         "sample_id": SAMPLE_ID,
@@ -236,11 +284,13 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
         "successful_reports": repetitions,
         "scenarios": {
             "A": {
-                "repetitions": repetitions,
+                "repetitions": len(supervisor_success),
                 "worker_calls": a_calls,
                 "agent_sessions": sessions,
-                "supervisor_summary_refs": [f"{ref}#evidence.reviews" for ref in refs],
-                "evidence_refs": refs,
+                "supervisor_summary_refs": [
+                    f"{ref}#evidence.supervisor_summary" for ref in supervisor_refs
+                ],
+                "evidence_refs": supervisor_refs,
             },
             "B": {
                 "repetitions": repetitions,
@@ -250,16 +300,12 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
                 "user_checkout_unchanged": repetitions > 0 and b_checkout,
                 "evidence_refs": refs,
             },
-            "D": {
-                "repetitions": repetitions,
-                "reviewer_detected_defect": repetitions > 0 and d_defect,
-                "rework_attempt": d_rework,
-                "post_rework_verification": d_final,
-                "evidence_refs": refs,
-            },
+            "D": d_scenario,
         },
         "notes": [
-            "A/B/D derived only from real-poc reports whose frozen checks are all true.",
+            "B is derived from real-poc reports whose frozen checks are all true.",
+            "A additionally requires a recorded supervisor_summary referencing both worker results.",
+            "D additionally requires an independent reviewer session distinct from the supervisor thread.",
             "failure_records retains every scanned report that did not meet the full frozen checks.",
             "C/E/F/G/H/I/J intentionally omitted; the R8 gate must keep them pending.",
         ],

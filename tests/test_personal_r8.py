@@ -179,7 +179,7 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
             )
         }
 
-        def report(run_id: str, passed: bool) -> dict:
+        def report(run_id: str, passed: bool, *, independent: bool = True) -> dict:
             return {
                 "status": "run-passed" if passed else "error",
                 "scenario_id": "real-poc-v1",
@@ -187,6 +187,10 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
                 "checks": checks if passed else {"codex_plan_valid": False},
                 "evidence": {
                     "failure": None if passed else {"error_type": "test", "message": "kept"},
+                    "codex": {"thread_id": f"{run_id}-supervisor"},
+                    "supervisor_summary": {
+                        "result_refs": [f"{run_id}-a", f"{run_id}-b"]
+                    },
                     "workers": {
                         "worker-a-attempt-1": {
                             "status": "completed",
@@ -208,7 +212,10 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
                         },
                     },
                     "reviews": {
-                        "worker-b-attempt-2": {"decision": {"decision": "PASS"}}
+                        "worker-b-attempt-2": {
+                            "decision": {"decision": "PASS"},
+                            **({"reviewer_session_id": f"{run_id}-reviewer"} if independent else {}),
+                        }
                     },
                     "git": {
                         "worktrees": {
@@ -236,6 +243,50 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
         self.assertEqual(evidence["scenarios"]["A"]["repetitions"], 2)
         self.assertTrue(evidence["scenarios"]["B"]["distinct_worktrees"])
         self.assertEqual(evidence["scenarios"]["D"]["post_rework_verification"][0]["review"]["decision"], "PASS")
+
+    def test_real_demo_without_summary_or_independent_reviewer_stays_pending(self) -> None:
+        checks = {
+            key: True
+            for key in (
+                "codex_chatgpt_auth", "codex_plan_valid", "real_workers_overlapped",
+                "codebuddy_sessions_distinct", "worker_commits_share_base",
+                "review_a_passed", "review_b1_requested_rework",
+                "codebuddy_rework_replaced_session", "review_b2_passed",
+                "worker_a_completed", "worker_b_completed",
+                "worker_b_first_attempt_rejected", "worker_b_second_attempt_accepted",
+                "accepted_commits_integrated", "rejected_commit_not_integrated",
+                "deterministic_content_passed", "integration_repository_clean",
+                "structured_messages_persisted", "user_checkout_head_unchanged",
+                "user_checkout_status_unchanged", "user_checkout_contents_unchanged",
+                "plaintext_credentials_absent",
+            )
+        }
+        raw = {
+            "status": "run-passed",
+            "scenario_id": "real-poc-v1",
+            "run_id": "run-shared-reviewer",
+            "checks": checks,
+            "evidence": {
+                "codex": {"thread_id": "supervisor-thread"},
+                "workers": {},
+                "reviews": {"worker-b-attempt-2": {"decision": {"decision": "PASS"}}},
+                "git": {
+                    "worktrees": {"a": "a", "b": "b", "b2": "b2"},
+                    "worker_a_result_commit": "a1",
+                    "worker_b_rejected_commit": "b1",
+                    "worker_b_accepted_commit": "b2c",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "run.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            evidence = build_evidence([path], root=Path(directory))
+        self.assertEqual(evidence["scenarios"]["A"]["repetitions"], 0)
+        self.assertEqual(evidence["scenarios"]["D"]["repetitions"], 0)
+        gate = evaluate_evidence(evidence)
+        self.assertEqual(gate["status"], "CHECKPOINT")
+        self.assertEqual(gate["scenarios"]["D"]["status"], "PENDING")
 
 
 if __name__ == "__main__":
