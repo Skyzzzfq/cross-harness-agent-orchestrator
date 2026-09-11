@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -93,6 +95,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/teams":
             self._get_teams()
             return
+        if path == "/api/projects":
+            self._get_projects()
+            return
         if path == "/api/model-catalog":
             self._get_model_catalog(parse_qs(parsed.query))
             return
@@ -108,7 +113,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if len(parts) >= 5 and parts[3] == "serve" and parts[4] == "status":
                 self._send_json(self._serve_status(parts[2]))
                 return
-            self._get_run_resource(path)
+            self._get_run_resource(self.path)
             return
         self._send_error_json(404, "not found")
 
@@ -120,6 +125,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/teams":
             self._save_team(body)
+            return
+        if path == "/api/projects":
+            self._save_project(body)
             return
         if path == "/api/model-providers":
             self._save_model_provider(body)
@@ -149,6 +157,19 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_error_json(404, "model provider not found")
                 return
             self._send_json({"ok": True, "provider_id": provider_id})
+            return
+        project_prefix = "/api/projects/"
+        if path.startswith(project_prefix):
+            project_id = path[len(project_prefix):].strip()
+            from orchestrator.console.settings import delete_project
+
+            if not project_id:
+                self._send_error_json(400, "project_id must not be empty")
+                return
+            if not delete_project(self.server.project_root, project_id):
+                self._send_error_json(404, "project not found")
+                return
+            self._send_json({"ok": True, "project_id": project_id})
             return
         self._send_error_json(404, "not found")
 
@@ -222,6 +243,22 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         from orchestrator.console.settings import list_saved_teams
 
         self._send_json({"teams": list_saved_teams(self.server.project_root)})
+
+    def _get_projects(self) -> None:
+        from orchestrator.console.settings import list_projects
+
+        self._send_json({"projects": list_projects(self.server.project_root)})
+
+    def _save_project(self, body: dict[str, Any]) -> None:
+        from orchestrator.console.settings import save_project
+
+        project = body.get("project") if isinstance(body.get("project"), dict) else body
+        try:
+            saved = save_project(self.server.project_root, project)
+        except ValueError as exc:
+            self._send_error_json(400, str(exc))
+            return
+        self._send_json({"ok": True, "project": saved})
 
     def _get_model_catalog(self, query: dict[str, list[str]]) -> None:
         from orchestrator.console.model_catalog import get_model_catalog
@@ -330,7 +367,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         return status
 
     def _get_run_resource(self, path: str) -> None:
-        parts = path.strip("/").split("/")
+        parsed = urlparse(path)
+        parts = parsed.path.strip("/").split("/")
+        query = parse_qs(parsed.query)
         # /api/runs/{run_id}[/{resource}]  resource: summary|tasks|events|merges|approvals|plans|artifacts|handoffs|results|evidence|workspace|outbox|agents
         if len(parts) < 3 or parts[0] != "api" or parts[1] != "runs":
             self._send_error_json(404, "not found")
@@ -491,7 +530,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 ).fetchone()
                 payload = None if row is None else dict(row)
             elif resource == "chat":
-                payload = self._chat_payload(run_id)
+                payload = self._chat_payload(
+                    run_id,
+                    cursor=int((query.get("cursor") or ["0"])[0] or 0),
+                    agent_id=str((query.get("agent_id") or [""])[0] or "").strip() or None,
+                )
             elif resource == "worktree":
                 cached = self.server._run_worktrees.get(run_id)
                 if cached is not None:
@@ -513,9 +556,41 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"run_id": run_id, resource: payload})
 
-    def _chat_payload(self, run_id: str) -> dict[str, Any]:
-        """Build a read-only conversation view from persisted task/call data."""
+    def _chat_payload(
+        self,
+        run_id: str,
+        *,
+        cursor: int = 0,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Build an isolated project → role → Agent conversation view.
+
+        ``cursor`` is an event rowid watermark. The first R6 UI still renders
+        the complete selected task, but the watermark is stable and lets a
+        later client request incremental refreshes without inventing stream
+        events the backend did not provide.
+        """
         store = self.server.store
+        run_row = store.connection.execute(
+            "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        project = {
+            "project_id": "current",
+            "name": self.server.project_root.name or str(self.server.project_root),
+            "workspace": str(self.server.project_root.resolve()),
+            "team_id": str(run_row["team_id"] if run_row is not None else ""),
+        }
+        next_cursor = int(
+            store.connection.execute(
+                "SELECT COALESCE(MAX(rowid), 0) FROM events WHERE run_id=?", (run_id,)
+            ).fetchone()[0]
+        )
+        event_rows = store.connection.execute(
+            "SELECT rowid, event_id, task_id, attempt_id, kind, from_state, to_state, "
+            "data_json, created_at FROM events WHERE run_id=? AND rowid>? "
+            "ORDER BY rowid LIMIT 200",
+            (run_id, max(0, int(cursor))),
+        ).fetchall()
         task_rows = store.connection.execute(
             """
             SELECT t.task_id, t.state, t.access_mode, t.created_at,
@@ -524,9 +599,15 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             FROM tasks t
             JOIN task_dispatch_specs d ON d.task_id = t.task_id
             WHERE t.run_id = ?
+              AND (
+                ? IS NULL OR EXISTS(
+                    SELECT 1 FROM attempts ax
+                    WHERE ax.task_id=t.task_id AND ax.agent_id=?
+                )
+              )
             ORDER BY t.created_at, t.task_id
             """,
-            (run_id,),
+            (run_id, agent_id, agent_id),
         ).fetchall()
         result: list[dict[str, Any]] = []
         agents: dict[str, dict[str, Any]] = {}
@@ -559,14 +640,23 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             ).fetchall()
             for row in protocol_rows:
                 envelope = decode(row["envelope_json"])
+                if agent_id and str(envelope.get("target_agent_id") or "") not in {"", agent_id} \
+                        and str(envelope.get("sender_agent_id") or "") != agent_id:
+                    continue
+                payload = envelope.get("payload")
+                if isinstance(payload, dict):
+                    message_text = str(payload.get("text") or payload.get("message") or payload)
+                else:
+                    message_text = str(payload or envelope.get("body") or envelope)
+                message_role = "user" if str(envelope.get("source") or "") == "user" else "system"
                 messages.append({
                     "id": str(row["message_id"]),
-                    "role": "system",
+                    "role": message_role,
                     "kind": str(envelope.get("kind") or "message"),
                     "agent_id": envelope.get("sender_agent_id"),
                     "backend": None,
                     "state": "persisted",
-                    "text": str(envelope.get("payload") or envelope.get("body") or envelope),
+                    "text": message_text,
                     "created_at": str(row["created_at"] or ""),
                 })
             calls = store.connection.execute(
@@ -577,9 +667,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 FROM backend_calls c
                 LEFT JOIN agent_instances a ON a.agent_id = c.agent_id
                 WHERE c.run_id=? AND c.task_id=?
+                  AND (? IS NULL OR c.agent_id=?)
                 ORDER BY c.requested_at, c.call_id
                 """,
-                (run_id, task_id),
+                (run_id, task_id, agent_id, agent_id),
             ).fetchall()
             for call in calls:
                 result_json = decode(call["result_json"])
@@ -595,10 +686,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     )
                 if text is None:
                     text = "（Agent 尚未返回内容）"
-                agent_id = str(call["agent_id"] or "")
-                if agent_id:
-                    agents[agent_id] = {
-                        "agent_id": agent_id,
+                call_agent_id = str(call["agent_id"] or "")
+                if call_agent_id:
+                    agents[call_agent_id] = {
+                        "agent_id": call_agent_id,
                         "backend": call["backend"],
                         "model": call["model"],
                         "provider_id": call["provider_id"],
@@ -607,7 +698,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     "id": str(call["call_id"]),
                     "role": "agent",
                     "kind": "backend_call",
-                    "agent_id": agent_id,
+                    "agent_id": call_agent_id,
                     "backend": call["backend"],
                     "model": call["model"],
                     "provider_id": call["provider_id"],
@@ -631,7 +722,66 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "handoffs": store.list_handoffs(run_id, task_id=task_id),
                 "results": store.list_task_results(run_id, task_id=task_id),
             })
-        return {"tasks": result, "agents": list(agents.values())}
+        role_rows = store.connection.execute(
+            """
+            SELECT b.role_id, b.agent_id, a.backend, a.model, a.provider_id, a.status
+            FROM role_bindings b JOIN agent_instances a ON a.agent_id=b.agent_id
+            WHERE b.run_id=? AND b.status='ACTIVE' AND b.binding_kind='PRIMARY'
+            ORDER BY b.role_id, b.agent_id
+            """,
+            (run_id,),
+        ).fetchall()
+        roles: dict[str, dict[str, Any]] = {}
+        try:
+            snapshot = store.run_snapshot(run_id).get("snapshot") or {}
+        except (KeyError, TypeError):
+            snapshot = {}
+        role_titles = {
+            str(item.get("role_id")): str(item.get("title") or item.get("role_id"))
+            for item in snapshot.get("roles", [])
+            if isinstance(item, dict) and item.get("role_id")
+        }
+        for row in role_rows:
+            role = roles.setdefault(
+                str(row["role_id"]),
+                {
+                    "role_id": str(row["role_id"]),
+                    "title": role_titles.get(str(row["role_id"]), str(row["role_id"])),
+                    "agents": [],
+                },
+            )
+            role["agents"].append(
+                {
+                    "agent_id": str(row["agent_id"]),
+                    "backend": row["backend"],
+                    "model": row["model"],
+                    "provider_id": row["provider_id"],
+                    "status": row["status"],
+                }
+            )
+        return {
+            "project": project,
+            "roles": list(roles.values()),
+            "tasks": result,
+            "agents": list(agents.values()),
+            "events": [
+                {
+                    "cursor": int(row["rowid"]),
+                    "event_id": row["event_id"],
+                    "task_id": row["task_id"],
+                    "attempt_id": row["attempt_id"],
+                    "kind": row["kind"],
+                    "from_state": row["from_state"],
+                    "to_state": row["to_state"],
+                    "data": decode(row["data_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in event_rows
+            ],
+            "cursor": next_cursor,
+            "requested_cursor": cursor,
+            "incremental": cursor > 0,
+        }
 
     # -- 协调写操作 ---------------------------------------------------------
 
@@ -753,6 +903,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             task_id = parts[4]
             self._review_task(run_id, task_id, body)
             return
+        if action == "tasks" and len(parts) >= 6 and parts[5] == "guidance":
+            self._queue_guidance(run_id, parts[4], body)
+            return
         if action == "tasks" and len(parts) == 4:
             self._create_task(run_id, body)
             return
@@ -779,6 +932,85 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             ) and self._send_json({"ok": True})
             return
         self._send_error_json(404, "not found")
+
+    def _queue_guidance(self, run_id: str, task_id: str, body: dict[str, Any]) -> None:
+        """Persist a user hint; serve decides whether the backend can apply it now."""
+        text = str(body.get("text") or body.get("prompt") or "").strip()
+        if not text:
+            self._send_error_json(400, "guidance text must not be empty")
+            return
+        if len(text) > 20_000:
+            self._send_error_json(400, "guidance text is too long")
+            return
+        store = self.server.store
+        row = store.connection.execute(
+            """
+            SELECT r.team_id, t.state, a.attempt_id, a.agent_id, a.state AS attempt_state,
+                   a.generation
+            FROM tasks t JOIN runs r ON r.run_id=t.run_id
+            LEFT JOIN attempts a ON a.attempt_id=(
+                SELECT ax.attempt_id FROM attempts ax
+                WHERE ax.task_id=t.task_id ORDER BY ax.attempt_number DESC LIMIT 1
+            )
+            WHERE t.run_id=? AND t.task_id=?
+            """,
+            (run_id, task_id),
+        ).fetchone()
+        if row is None:
+            self._send_error_json(404, "task not found")
+            return
+        if row["attempt_id"] is None or row["attempt_state"] not in {
+            "ASSIGNED", "RUNNING", "CANCEL_REQUESTED"
+        }:
+            self._send_error_json(
+                409,
+                "task has no active attempt; guidance must target a running Agent",
+            )
+            return
+        from orchestrator.core.models import MessageEnvelope, Recipient
+
+        plan_row = store.connection.execute(
+            "SELECT MAX(revision) AS revision FROM supervisor_plans WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        message = MessageEnvelope(
+            message_id=f"msg-guidance-{uuid.uuid4().hex[:16]}",
+            team_id=str(row["team_id"]),
+            run_id=run_id,
+            task_id=task_id,
+            sender_agent_id="user",
+            recipients=(Recipient("agent", str(row["agent_id"])),),
+            kind="user_guidance",
+            message_type="user_guidance",
+            source="user",
+            target_agent_id=str(row["agent_id"]),
+            attempt_id=str(row["attempt_id"]),
+            plan_revision=(int(plan_row["revision"]) if plan_row and plan_row["revision"] else None),
+            payload={"text": text},
+            correlation_id=f"guidance:{task_id}:{row['attempt_id']}",
+            idempotency_key=(
+                f"guidance:{task_id}:{row['attempt_id']}:"
+                f"{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}"
+            ),
+            expires_at=(
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            ).isoformat(),
+        )
+        try:
+            store.append_message(message)
+        except Exception as exc:  # noqa: BLE001
+            self._send_error_json(400, f"{type(exc).__name__}: {exc}")
+            return
+        self._send_json(
+            {
+                "ok": True,
+                "status": "queued",
+                "message_id": message.message_id,
+                "task_id": task_id,
+                "attempt_id": row["attempt_id"],
+                "agent_id": row["agent_id"],
+            }
+        )
 
     def _create_task(self, run_id: str, body: dict[str, Any]) -> None:
         if TaskState is None:  # pragma: no cover

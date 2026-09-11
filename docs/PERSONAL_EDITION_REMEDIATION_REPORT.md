@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1、R2、R3、R4、R5 已完成；整体整改保持 `stage3: checkpoint`，R6–R8 尚未开始。**
+状态：**R0、R1、R2、R3、R4、R5 已完成；R6 对话工作台切片已完成并保持 `stage3: checkpoint`，R7–R8 尚未开始。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -252,6 +252,35 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 
 本地消息不会因进程重启或重复消费静默丢失，旧尝试引导不能进入当前执行，取消未确认不会提前复用 Agent/Session，预算 reservation 和进度证据均落 SQLite。R6 继续实现项目—角色—Agent 对话工作台；真实 Codex/CodeBuddy 活动引导与取消确认继续保持未验证。
 
+## R6：项目—角色—Agent 对话工作台
+
+更新时间：2026-09-11
+状态：**R6 对话工作台切片已完成（本地 HTTP/SQLite/静态页证据通过）；真实后端活动插话、跨工作空间热切换和完整浏览器端到端验收仍未完成。**
+
+### 1. 已实现
+
+- `.agent-hub/settings.json` 增加项目元数据：项目 ID、名称、本地绝对 workspace 和默认团队；服务端校验路径存在且为目录，删除只删除元数据，不删除用户工作区。
+- 新增 `/api/projects` 的列出、保存和删除接口；当前工作空间以 `current` 项目返回，保存的项目可供控制台选择和启动说明使用。
+- `/api/runs/{run_id}/chat` 增加项目元数据、角色→Agent 树、`agent_id` 过滤和基于事件 `rowid` 的 `cursor`/`events` 增量游标；同一任务的用户说明、协议消息、后端调用、handoff 和结果仍按任务隔离。
+- 对话页左栏增加项目表单、角色和 Agent 导航；选择 Agent 后只请求该 Agent 关联的任务/调用；刷新保留 Run、任务、Agent 和游标状态。
+- 新增运行中引导接口 `/api/runs/{run_id}/tasks/{task_id}/guidance`。引导先作为 `user_guidance` durable message 入队，必须绑定活动 attempt；过期/关闭 attempt 返回 409，调度器再按后端能力决定即时投递或本轮结束后投递。
+- 采用稳定的引导幂等键（任务、attempt、文本摘要），不把凭据或模型会话内容写入项目设置。
+
+### 2. R6 验证
+
+| 检查 | 结果 | 证据 |
+|---|---|---|
+| 项目保存/列出/删除不触碰 workspace | PASS | `tests/test_personal_r6.py::test_projects_api_persists_metadata_without_touching_workspace` |
+| 项目→角色→Agent、Agent 过滤和游标增量 | PASS | `tests/test_personal_r6.py::test_chat_returns_project_tree_cursor_and_agent_filter` |
+| 运行中引导入队并绑定最新活动 attempt | PASS | `tests/test_personal_r6.py::test_guidance_is_queued_for_the_latest_active_attempt` |
+| 关闭 attempt 的引导拒绝 | PASS | `tests/test_personal_r6.py::test_guidance_rejects_closed_attempt` |
+| 静态页 JavaScript 语法与变更检查 | PASS | Node `--check`、`git diff --check` |
+| 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；335 项，334 通过、1 跳过 |
+
+### 3. R6 限制与未完成项
+
+项目选择当前保存的是受校验的元数据；正在运行的控制台不会在浏览器内热切换根目录，切换 workspace 仍需从目标目录重新启动控制台。游标接口返回事件增量，但当前页面为安全起见仍回放选中任务的持久上下文，不伪造流式工具轨迹。Codex 活动 `steer`、CodeBuddy 即时插话和取消确认仍以 R0/R5 能力表为准，尚无本轮真实后端证据；本切片只保证引导意图不丢失、目标 attempt 不错配。
+
 ## 5. 下一步
 
-R5 已完成，下一切片是 R6：项目—角色—Agent 对话工作台与用户引导。
+R6 已提交为对话工作台 checkpoint；下一切片是 R7：升级/恢复演练、历史归档清理预览、启动与故障排查文档。R8 仍需真实后端端到端验收，不能用 Fake 或 API 单测替代。

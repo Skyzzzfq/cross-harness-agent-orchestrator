@@ -158,6 +158,12 @@ button{font-family:inherit;cursor:pointer}
 .chat-task.active{background:var(--accent-soft);color:var(--text);box-shadow:inset 3px 0 var(--accent)}
 .chat-task .chat-task-id{font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chat-task .chat-task-meta{font-size:11px;color:var(--text-3);margin-top:3px}
+.chat-tree-project{display:grid;gap:3px;padding:12px 15px;border-bottom:1px solid var(--line-soft)}
+.chat-tree-project b{font-size:13px}.chat-tree-project span,.chat-tree-project small{font-size:11px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-tree-role{padding:8px 10px;border-bottom:1px solid var(--line-soft)}
+.chat-tree-label{font-size:11px;color:var(--text-3);padding:2px 5px 5px;text-transform:uppercase}
+.chat-agent-link{display:flex;justify-content:space-between;gap:8px;width:100%;border:0;border-radius:5px;background:transparent;color:var(--text-2);text-align:left;padding:7px 8px;cursor:pointer;font-family:inherit;font-size:12px}
+.chat-agent-link:hover,.chat-agent-link.active{background:var(--accent-soft);color:var(--text)}
 .chat-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;min-width:0}
 .chat-panel-head{padding:14px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .chat-panel-head .grow{margin-left:auto;display:flex;gap:8px;align-items:center}
@@ -259,10 +265,27 @@ button:focus-visible,.field input:focus-visible,.field select:focus-visible,.fie
     <span id="chatStatus" class="muted" style="align-self:center">选择一个 Run 查看对话</span>
   </div>
   <div class="chat-layout">
-    <aside class="chat-sidebar"><h3>任务上下文</h3><div id="chatTaskList"><div class="empty">暂无任务</div></div></aside>
+    <aside class="chat-sidebar">
+      <h3>项目 · 角色 · Agent</h3>
+      <form id="projectForm" style="padding:10px 12px;border-bottom:1px solid var(--line-soft)">
+        <div class="field"><label>项目</label><select id="projectSelect"></select></div>
+        <div class="field" style="margin-top:7px"><label>名称</label><input id="projectName" placeholder="个人项目"></div>
+        <div class="field" style="margin-top:7px"><label>本地工作空间（绝对路径）</label><input id="projectWorkspace" placeholder="D:\\workspace\\my-project"></div>
+        <div class="field" style="margin-top:7px"><label>默认团队</label><input id="projectDefaultTeam" value="config/team.yaml"></div>
+        <button class="ghost btn sm" type="submit" style="margin-top:8px;width:100%">保存项目</button>
+        <div id="projectStatus" class="muted" style="margin-top:6px"></div>
+      </form>
+      <div id="chatProjectTree"><div class="empty">暂无项目</div></div>
+      <div style="border-top:1px solid var(--line-soft);padding:10px 15px 6px;color:var(--text-3);font-size:11px">任务上下文</div>
+      <div id="chatTaskList"><div class="empty">暂无任务</div></div>
+    </aside>
     <section class="chat-panel">
       <div class="chat-panel-head"><b id="chatTitle">请选择任务</b><span id="chatTaskState"></span><span class="grow"><span id="chatAgentMeta" class="muted"></span><button class="ghost btn sm" id="chatRefresh">刷新</button></span></div>
       <div class="chat-stream" id="chatStream"><div class="empty">左侧选择任务后，这里会显示任务说明、Agent 返回和系统消息。</div></div>
+      <form id="chatGuidanceForm" style="border-top:1px solid var(--line-soft);padding:12px;display:flex;gap:8px;align-items:end">
+        <div class="field" style="flex:1"><label>运行中引导（先入队，serve 按后端能力投递）</label><textarea id="chatGuidanceText" rows="2" placeholder="给当前 Agent 的补充说明"></textarea></div>
+        <button class="btn" type="submit">发送引导</button>
+      </form>
     </section>
   </div>
 </main>
@@ -357,6 +380,9 @@ let currentRun="";
 let expandedRun="";
 let chatRun="";
 let chatTask="";
+let chatAgent="";
+let chatCursor=0;
+let projects=[];
 const MODEL_CATALOGS={};
 let MODEL_PROVIDERS=[];
 const CODEBUDDY_PROBE_CACHE={};
@@ -366,6 +392,31 @@ const mono=v=>`<span class="mono">${esc(v)}</span>`;
 async function api(path,opt){try{const r=await fetch(path,opt);const d=await r.json().catch(()=>({}));return{status:r.status,body:d};}catch(e){return{status:0,body:{error:String(e)}};}}
 function toast(msg,kind="info"){const t=document.createElement("div");t.className="toast "+kind;t.textContent=msg;
   $("#toasts").appendChild(t);setTimeout(()=>t.remove(),kind==="err"?5000:2800);}
+
+async function loadProjects(){
+  const r=await api("/api/projects");
+  if(r.status!==200)return;
+  projects=r.body.projects||[];
+  const select=$("#projectSelect");
+  select.innerHTML=projects.map(project=>`<option value="${esc(project.project_id)}">${esc(project.name)}${project.current?"（当前）":""}</option>`).join("");
+  const current=projects.find(project=>project.current)||projects[0];
+  if(current){select.value=current.project_id;fillProjectForm(current);}
+  select.onchange=()=>{const project=projects.find(item=>item.project_id===select.value);if(project)fillProjectForm(project);};
+}
+function fillProjectForm(project){
+  $("#projectName").value=project.name||"";
+  $("#projectWorkspace").value=project.workspace||"";
+  $("#projectDefaultTeam").value=project.default_team||"config/team.yaml";
+  $("#projectStatus").textContent=project.current?"当前控制台工作空间":"已保存元数据；切换工作空间需重新以该目录启动控制台";
+}
+$("#projectForm").onsubmit=async event=>{
+  event.preventDefault();
+  const id=$("#projectSelect").value&&$("#projectSelect").value!=="current"?$("#projectSelect").value:(($("#projectName").value.trim()||"project").toLowerCase().replace(/[^a-z0-9_.-]+/g,"-")||"project");
+  const body={project_id:id,name:$("#projectName").value.trim()||id,workspace:$("#projectWorkspace").value.trim(),default_team:$("#projectDefaultTeam").value.trim()||"config/team.yaml"};
+  const r=await api("/api/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(r.status!==200){toast(r.body.error||"保存项目失败","err");return;}
+  toast("项目元数据已保存；要切换运行空间，请从该目录重新启动控制台","ok");await loadProjects();
+};
 
 async function loadModelCatalog(backend,force=false){
   if(!force&&MODEL_CATALOGS[backend])return MODEL_CATALOGS[backend];
@@ -714,7 +765,7 @@ async function control(runId,action){
 
 /* ============ Agent Chat ============ */
 function openChat(runId,taskId=""){
-  chatRun=runId;chatTask=taskId;
+  chatRun=runId;chatTask=taskId;chatAgent="";chatCursor=0;
   const navButton=$("nav button[data-tab='chat']");
   if(navButton)navButton.click();
   else loadChat(runId,taskId);
@@ -729,14 +780,20 @@ async function loadChatRuns(){
   select.value=chatRun;
   await loadChat(chatRun,chatTask);
 }
-$("#chatRunSelect").onchange=()=>{chatRun=$("#chatRunSelect").value;chatTask="";loadChat(chatRun,"");};
+$("#chatRunSelect").onchange=()=>{chatRun=$("#chatRunSelect").value;chatTask="";chatAgent="";chatCursor=0;loadChat(chatRun,"");};
 $("#chatRefresh").onclick=()=>chatRun&&loadChat(chatRun,chatTask);
 async function loadChat(runId,taskId=""){
   if(!runId)return;
-  const r=await api(`/api/runs/${encodeURIComponent(runId)}/chat`);
+  const params=new URLSearchParams();
+  if(chatCursor)params.set("cursor",String(chatCursor));
+  if(chatAgent)params.set("agent_id",chatAgent);
+  const suffix=params.toString()?`?${params}`:"";
+  const r=await api(`/api/runs/${encodeURIComponent(runId)}/chat${suffix}`);
   if(r.status!==200){toast(r.body.error||"加载对话失败","err");return;}
-  const tasks=r.body.chat?.tasks||[],list=$("#chatTaskList");
-  if(!tasks.length){list.innerHTML='<div class="empty">这个 Run 还没有任务。</div>';$("#chatStream").innerHTML='<div class="empty">暂无对话。</div>';return;}
+  const chat=r.body.chat||{},tasks=chat.tasks||[],list=$("#chatTaskList");
+  if(chat.cursor!=null)chatCursor=Number(chat.cursor)||chatCursor;
+  renderChatTree(chat,runId,taskId);
+  if(!tasks.length){list.innerHTML='<div class="empty">这个 Run 还没有任务。</div>';$("#chatTitle").textContent="请选择任务";$("#chatStream").innerHTML='<div class="empty">暂无对话。</div>';return;}
   const selected=tasks.some(x=>x.task_id===taskId)?taskId:(tasks.some(x=>x.task_id===chatTask)?chatTask:tasks[0].task_id);
   chatTask=selected;
   list.innerHTML=tasks.map(t=>`<button class="chat-task${t.task_id===selected?" active":""}" data-chat-select="${esc(t.task_id)}"><div class="chat-task-id">${esc(t.task_id)}</div><div class="chat-task-meta">${esc(t.role_id||"worker")} · ${pill(t.state)}</div></button>`).join("");
@@ -747,9 +804,34 @@ async function loadChat(runId,taskId=""){
   const agentMessages=(task.messages||[]).filter(x=>x.role==="agent");
   const agentNames=[...new Set(agentMessages.map(x=>[x.agent_id,x.backend,x.model].filter(Boolean).join(" · ")))].filter(Boolean);
   $("#chatAgentMeta").textContent=agentNames.length?agentNames.join(" / "):"尚未绑定 Agent";
-  $("#chatStatus").textContent=`${tasks.length} 个任务 · 每 2.5 秒自动刷新`;
+  $("#chatStatus").textContent=`${tasks.length} 个任务 · 游标 ${chatCursor||0} · 每 2.5 秒自动刷新`;
   $("#chatStream").innerHTML=(task.messages||[]).map(m=>`<article class="chat-msg ${esc(m.role||"system")}"><div class="chat-msg-meta"><span>${m.role==="agent"?"Agent":m.role==="user"?"任务":"系统"}</span>${m.agent_id?`<span>${esc(m.agent_id)}</span>`:""}${m.backend?`<span>${esc(m.backend)}${m.model?` · ${esc(m.model)}`:""}</span>`:""}<span>${esc((m.state||"").toUpperCase())}</span><span>${esc((m.created_at||"").slice(0,19).replace("T"," "))}</span></div><div>${esc(m.text||"")}</div></article>`).join("");
 }
+function renderChatTree(chat,runId,taskId){
+  const box=$("#chatProjectTree"),project=chat.project||{},roles=chat.roles||[];
+  const roleMap={};
+  roles.forEach(role=>{roleMap[role.role_id]={...role,agents:[]};});
+  (chat.agents||[]).forEach(agent=>{
+    const roleId=agent.role_id||"unassigned";
+    if(!roleMap[roleId])roleMap[roleId]={role_id:roleId,title:roleId,agents:[]};
+    roleMap[roleId].agents.push(agent);
+  });
+  const roleNodes=Object.values(roleMap).map(role=>`<div class="chat-tree-role"><div class="chat-tree-label">${esc(role.title||role.role_id)}</div>${(role.agents||[]).map(agent=>`<button class="chat-agent-link${chatAgent===agent.agent_id?" active":""}" data-chat-agent="${esc(agent.agent_id)}">${esc(agent.agent_id)}<span class="muted">${esc(agent.backend||"")}</span></button>`).join("")||'<div class="muted" style="padding:4px 8px">暂无实例</div>'}</div>`).join("");
+  box.innerHTML=`<div class="chat-tree-project"><b>${esc(project.name||"当前项目")}</b><span class="muted">${esc(project.workspace||"")}</span><small>团队：${esc(project.team_id||"")}</small></div>${roleNodes||'<div class="empty">暂无角色/Agent</div>'}`;
+  box.querySelectorAll("[data-chat-agent]").forEach(button=>button.onclick=()=>{
+    chatAgent=button.dataset.chatAgent;chatCursor=0;loadChat(runId,taskId||chatTask);
+  });
+}
+$("#chatGuidanceForm").onsubmit=async event=>{
+  event.preventDefault();
+  if(!chatRun||!chatTask){toast("请先选择任务","err");return;}
+  const text=$("#chatGuidanceText").value.trim();
+  if(!text){toast("引导内容不能为空","err");return;}
+  const path="/api/runs/"+encodeURIComponent(chatRun)+"/tasks/"+encodeURIComponent(chatTask)+"/guidance";
+  const r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
+  if(r.status!==200){toast(r.body.error||"引导入队失败","err");return;}
+  $("#chatGuidanceText").value="";toast("引导已入队，等待调度器投递","ok");await loadChat(chatRun,chatTask);
+};
 
 /* ============ Teams ============ */
 const BACKENDS=[["fake","Fake（离线）"],["codex","OpenAI Codex"],["codebuddy","WorkBuddy / CodeBuddy"]];
@@ -964,7 +1046,7 @@ $("#connList").addEventListener("click",async e=>{
 (async function(){
   const st=await api("/api/status");
   if(st.body.project_root)$("#projPath").textContent=st.body.project_root;
-  await loadRuns();loadTeams();loadConnections();
+  await loadRuns();loadTeams();loadConnections();loadProjects();
   const init=st.body.run_id;
   if(init){currentRun=init;const card=$("[data-detail='"+init+"']");if(card){/* 已渲染时自动展开 */}}
   setInterval(()=>{if($("nav button.active")?.dataset.tab==="runs")loadRuns();},8000);

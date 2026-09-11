@@ -20,6 +20,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "default_team": "config/team.yaml",
     "default_backend": "fake",
     "model_providers": [],
+    "projects": [],
 }
 
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -162,6 +163,99 @@ def save_settings(project_root: Path, settings: dict[str, Any]) -> Path:
         json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return path
+
+
+def _normalize_project(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError("project must be an object")
+    project_id = str(raw.get("project_id") or "").strip()
+    if not project_id or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", project_id):
+        raise ValueError("project_id must contain only letters, numbers, '.', '_' or '-'")
+    name = str(raw.get("name") or project_id).strip()
+    workspace_raw = str(raw.get("workspace") or "").strip()
+    if not workspace_raw:
+        raise ValueError("workspace must not be empty")
+    workspace = Path(workspace_raw).expanduser()
+    if not workspace.is_absolute():
+        raise ValueError("workspace must be an absolute path")
+    try:
+        resolved = workspace.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("workspace directory does not exist") from exc
+    if not resolved.is_dir():
+        raise ValueError("workspace must be a directory")
+    default_team = str(raw.get("default_team") or "config/team.yaml").strip()
+    if not default_team:
+        default_team = "config/team.yaml"
+    return {
+        "project_id": project_id,
+        "name": name or project_id,
+        "workspace": str(resolved),
+        "default_team": default_team,
+    }
+
+
+def list_projects(project_root: Path) -> list[dict[str, Any]]:
+    """Return the current workspace plus saved local project entries."""
+    current = {
+        "project_id": "current",
+        "name": project_root.name or str(project_root),
+        "workspace": str(project_root.resolve()),
+        "default_team": load_settings(project_root).get("default_team") or "config/team.yaml",
+        "current": True,
+    }
+    projects = [current]
+    seen = {current["workspace"]}
+    raw = load_settings(project_root).get("projects", [])
+    if not isinstance(raw, list):
+        return projects
+    for item in raw:
+        try:
+            normalized = _normalize_project(item)
+        except ValueError:
+            continue
+        if normalized["workspace"] in seen:
+            continue
+        normalized["current"] = False
+        seen.add(normalized["workspace"])
+        projects.append(normalized)
+    return projects
+
+
+def save_project(project_root: Path, project: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_project(project)
+    settings = load_settings(project_root)
+    existing = settings.get("projects", [])
+    if not isinstance(existing, list):
+        existing = []
+    remaining = []
+    for item in existing:
+        try:
+            item_norm = _normalize_project(item)
+        except ValueError:
+            continue
+        if item_norm["project_id"] != normalized["project_id"]:
+            remaining.append(item_norm)
+    remaining.append(normalized)
+    settings["projects"] = remaining
+    save_settings(project_root, settings)
+    return normalized
+
+
+def delete_project(project_root: Path, project_id: str) -> bool:
+    settings = load_settings(project_root)
+    existing = settings.get("projects", [])
+    if not isinstance(existing, list):
+        return False
+    remaining = [
+        item for item in existing
+        if not isinstance(item, dict) or str(item.get("project_id") or "") != project_id
+    ]
+    if len(remaining) == len(existing):
+        return False
+    settings["projects"] = remaining
+    save_settings(project_root, settings)
+    return True
 
 
 def teams_dir(project_root: Path) -> Path:

@@ -1,6 +1,6 @@
 # 个人开发版多 Agent 协作整改计划
 
-编制日期：2026-09-11。状态：R0、R1、R2、R3、R4、R5 已验收；R6–R8 待实施。
+编制日期：2026-09-11。状态：R0、R1、R2、R3、R4、R5 已验收；R6 对话工作台切片已完成并保持 checkpoint；R7–R8 待实施。
 
 目标：用户向主管提交一次任务，由主管规划、两个 Worker 按需并行、独立 Reviewer 根据真实证据审核，系统完成有限返工、集成与交付；用户可以查看每个 Agent 的对话并给出引导。
 
@@ -309,7 +309,7 @@ A、B、D 至少各重复 3 次；每次记录失败，不只挑成功截图。�
 | R3 移交与聚合 | **完成** | 本轮 R3 提交（见 `git log`） | handoff/result/父任务聚合 Fake 证据通过；全量 321/320/1；真实后端汇总未验证 | 依赖 R2 |
 | R4 验证与交付 | **完成** | 本轮 R4 提交（见 `git log`） | 固定检查/evidence-bound 审核/旧证据拒绝/两轮返工专项通过；真实后端未验证 | 依赖 R3 |
 | R5 消息与预算 | **完成** | 本轮 R5 提交（见 `git log`） | schema v20；durable deliveries；取消确认与资源保留；进度心跳和预算 reservation；全量 331/330/1；真实后端即时引导/取消确认未验证 | 依赖 R4 |
-| R6 对话工作台 | 待开始 | — | — | 依赖 R5 |
+| R6 对话工作台 | **checkpoint（切片完成）** | 本轮 `stage3: checkpoint project agent conversation workspace` | 项目元数据 API；项目→角色→Agent 导航；chat cursor/events 与 Agent 过滤；运行中引导 durable 入队；全量 335/334/1 | 真实活动插话、跨 workspace 热切换和完整浏览器端到端仍待 R7/R8 处理 |
 | R7 恢复与文档 | 待开始 | — | — | 依赖 R6 |
 | R8 真实验收 | 待开始 | — | — | 依赖 R7 |
 
