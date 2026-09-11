@@ -9,6 +9,7 @@ from typing import Any
 
 from orchestrator.adapters.codebuddy_config import (
     CODEBUDDY_REGION,
+    codebuddy_environment_for_provider,
     codebuddy_china_environment,
     preferred_codebuddy_cli,
 )
@@ -132,6 +133,7 @@ class CodexBackendAdapter:
             approval_mode=ApprovalMode.deny_all,
             cwd=request.policy.cwd,
             ephemeral=True,
+            model=request.session.model,
             sandbox=sandbox,
         )
         turn = await thread.turn(request.prompt)
@@ -178,19 +180,15 @@ class _CodexRunningCall(_BaseRunningCall):
         except TimeoutError:
             # P1-05：超时后底层 Turn 可能仍在运行——必须尝试 interrupt，
             # 且显式声明 backend_may_still_run，让编排器隔离晚到结果。
+            # 注意：这里位于 ``self._task`` 自身内部，不能再 await
+            # ``self._task``。旧实现会触发 "Task cannot await on itself"，
+            # 让本应进入 TIMED_OUT 的调用一直保持 RUNNING，最终被调度器
+            # 回收成 adapter-execution-error/orphaned。
             backend_may_still_run = True
             try:
                 await asyncio.wait_for(self._turn.interrupt(), timeout=15.0)
             except Exception:
                 pass
-            else:
-                try:
-                    await asyncio.wait_for(self._task, timeout=30.0)
-                except TimeoutError:
-                    pass
-                except asyncio.CancelledError:
-                    pass
-                backend_may_still_run = False
             await self._finish(
                 CallState.TIMED_OUT,
                 failure=Failure(
@@ -330,7 +328,19 @@ class CodeBuddyBackendAdapter:
                     retryable=False,
                 ),
             )
-        env = codebuddy_china_environment()
+        try:
+            env = codebuddy_environment_for_provider(
+                Path(request.policy.cwd), request.session.provider_id
+            )
+        except ValueError as exc:
+            return _BlockedRunningCall(
+                request,
+                Failure(
+                    kind="provider_unavailable",
+                    message=str(exc),
+                    retryable=False,
+                ),
+            )
         # 跳过 Git Bash 检测（编排场景不需要），消除 wmic 告警
         env["CODEBUDDY_SKIP_GIT_BASH_CHECK"] = "1"
         # 写任务给可编辑权限；只读任务 plan 模式。写边界由受管 worktree +
@@ -342,6 +352,7 @@ class CodeBuddyBackendAdapter:
             # 写任务需要多轮工具调用（Edit/Write 文件 + 自检），给足轮次；
             # 只读 marker 任务单轮即可。
             max_turns=20 if request.policy.access_mode == "write" else 1,
+            model=request.session.model,
             permission_mode=perm,
             allowed_tools=[],
             disallowed_tools=[],

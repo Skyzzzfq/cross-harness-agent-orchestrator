@@ -26,7 +26,7 @@ def login_codex(cwd: Path) -> int:
     return completed.returncode
 
 
-async def _login_codebuddy(cwd: Path) -> int:
+async def _login_codebuddy(cwd: Path, *, open_browser: bool = False) -> int:
     from codebuddy_agent_sdk import authenticate
 
     auth = await authenticate(
@@ -36,20 +36,28 @@ async def _login_codebuddy(cwd: Path) -> int:
         timeout=300.0,
     )
     if auth.auth_url:
-        print("Open this one-time CodeBuddy sign-in URL in your browser:")
-        print(auth.auth_url)
+        if open_browser:
+            import webbrowser
+
+            if not webbrowser.open_new(auth.auth_url):
+                print("Unable to open the browser automatically.")
+                print("Open this one-time CodeBuddy sign-in URL manually:")
+                print(auth.auth_url)
+        else:
+            print("Open this one-time CodeBuddy sign-in URL in your browser:")
+            print(auth.auth_url)
     await auth
     print("CodeBuddy sign-in completed.")
     return 0
 
 
-def login_codebuddy(cwd: Path) -> int:
-    return asyncio.run(_login_codebuddy(cwd))
+def login_codebuddy(cwd: Path, *, open_browser: bool = False) -> int:
+    return asyncio.run(_login_codebuddy(cwd, open_browser=open_browser))
 
 
-def login(backend: str, cwd: Path) -> int:
+def login(backend: str, cwd: Path, *, open_browser: bool = False) -> int:
     if backend == "codex":
         return login_codex(cwd)
     if backend == "codebuddy":
-        return login_codebuddy(cwd)
+        return login_codebuddy(cwd, open_browser=open_browser)
     raise ValueError(f"Unsupported backend: {backend}")

@@ -15,57 +15,58 @@
   --r:12px; --r-sm:8px;
   --mono:ui-monospace,"Cascadia Code",Consolas,monospace;
 }
-*{box-sizing:border-box;margin:0;padding:0}
+*{box-sizing:border-box;margin:0;padding:0;min-width:0}
 html,body{height:100%}
 body{
   font-family:-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   background:radial-gradient(1200px 600px at 80% -10%,#16233f 0%,transparent 60%),var(--bg);
-  color:var(--text);font-size:14px;line-height:1.6;
+  color:var(--text);font-size:14px;line-height:1.6;overflow-x:hidden;
 }
 /* ---------- 顶栏 ---------- */
 header{
   position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:20px;
-  padding:0 22px;height:56px;background:rgba(11,18,32,.82);backdrop-filter:blur(10px);
+  padding:0 22px;min-height:56px;height:auto;background:rgba(11,18,32,.82);backdrop-filter:blur(10px);
   border-bottom:1px solid var(--line);
 }
-.logo{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;letter-spacing:.2px}
+.logo{display:flex;align-items:center;gap:9px;flex:0 1 auto;min-width:0;font-weight:700;font-size:15px;letter-spacing:.2px;white-space:nowrap}
 .logo .dot{width:10px;height:10px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2));box-shadow:0 0 12px rgba(79,140,255,.8)}
-nav{display:flex;gap:2px}
+nav{display:flex;gap:2px;min-width:0;overflow-x:auto;scrollbar-width:thin}
 nav button{
   border:0;background:transparent;color:var(--text-2);padding:7px 14px;border-radius:var(--r-sm);
-  cursor:pointer;font-size:13.5px;font-family:inherit;transition:.15s
+  cursor:pointer;font-size:13.5px;font-family:inherit;transition:.15s;white-space:nowrap;flex:0 0 auto
 }
 nav button:hover{color:var(--text);background:rgba(255,255,255,.04)}
 nav button.active{color:#fff;background:var(--accent-soft)}
 nav button.active::after{content:"";display:block;height:2px;border-radius:2px;margin-top:3px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
-.head-meta{margin-left:auto;display:flex;align-items:center;gap:10px;color:var(--text-3);font-size:12px}
+.head-meta{margin-left:auto;display:flex;align-items:center;gap:10px;min-width:0;max-width:48%;color:var(--text-3);font-size:12px}
 .chip{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:11.5px}
+.head-meta .chip{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .live{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok);margin-right:5px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 /* ---------- 布局 ---------- */
-main{max-width:1180px;margin:0 auto;padding:26px 24px 90px;display:none}
+main{width:100%;max-width:1180px;margin:0 auto;padding:26px 24px 90px;display:none}
 main.active{display:block}
-.view-head{display:flex;align-items:baseline;gap:12px;margin-bottom:18px}
+.view-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:18px}
 .view-head h2{font-size:20px;font-weight:650}
-.view-head .sub{color:var(--text-3);font-size:12.5px}
+.view-head .sub{min-width:0;color:var(--text-3);font-size:12.5px;overflow-wrap:anywhere}
 /* ---------- 卡片 ---------- */
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow)}
 .card + .card{margin-top:16px}
-.card-h{padding:13px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px}
+.card-h{padding:13px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;flex-wrap:wrap;gap:10px}
 .card-h h3{font-size:14px;font-weight:600}
-.card-h .grow{margin-left:auto;display:flex;gap:8px;align-items:center}
+.card-h .grow{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .card-b{padding:18px}
 /* ---------- 统计 ---------- */
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
 .stat .k{color:var(--text-3);font-size:12px}
-.stat .v{font-size:24px;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums}
+.stat .v{font-size:24px;font-weight:650;margin-top:2px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .stat .v.ok{color:var(--ok)} .stat .v.warn{color:var(--warn)} .stat .v.accent{color:var(--accent)}
 /* ---------- 表格 ---------- */
 .tbl-wrap{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:13.5px}
 th{color:var(--text-3);font-weight:500;font-size:12px;text-align:left;padding:8px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
-td{padding:9px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+td{padding:9px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle;overflow-wrap:anywhere}
 tbody tr:last-child td{border-bottom:0}
 tbody tr:hover{background:rgba(255,255,255,.018)}
 .mono{font-family:var(--mono);font-size:12.5px}
@@ -103,6 +104,8 @@ button{font-family:inherit;cursor:pointer}
   background:var(--bg-soft);border:1px solid var(--line);border-radius:var(--r-sm);
   color:var(--text);padding:8px 11px;font-size:13.5px;font-family:inherit;transition:.15s
 }
+.field select optgroup{color:var(--text-2);font-weight:650;background:var(--panel)}
+.field select option{background:var(--bg-soft);color:var(--text)}
 .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .form-row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -112,26 +115,26 @@ button{font-family:inherit;cursor:pointer}
 .run-card:hover{border-color:#2e4468}
 .run-head{display:flex;align-items:center;gap:14px;padding:14px 18px;flex-wrap:wrap}
 .run-id{font-family:var(--mono);font-size:14px;font-weight:600}
-.run-meta{color:var(--text-3);font-size:12px}
-.run-actions{margin-left:auto;display:flex;gap:8px;align-items:center}
+.run-meta{min-width:0;color:var(--text-3);font-size:12px;overflow-wrap:anywhere}
+.run-actions{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .run-bar{height:3px;background:var(--line-soft)}
 .run-bar .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .4s}
 .run-detail{padding:18px;border-top:1px solid var(--line-soft);background:var(--bg-soft)}
 /* ---------- 连接卡 ---------- */
-.conn{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+.conn{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
 .conn .card{margin:0}
 .conn .backend{font-family:var(--mono);font-size:13px;font-weight:600}
 .conn .cmd{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font-family:var(--mono);font-size:12px;color:var(--accent-2);overflow-x:auto}
 /* ---------- Teams ---------- */
-.team-tile{display:flex;gap:14px;align-items:center;justify-content:space-between;padding:14px 18px}
+.team-tile{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:14px 18px}
 .pool-tag{display:inline-flex;align-items:center;gap:5px;background:var(--bg-soft);border:1px solid var(--line);border-radius:6px;padding:2px 8px;font-size:12px;margin:2px}
 .pool-tag b{color:var(--accent-2);font-weight:600}
-.pool-rows .pool-row{display:grid;grid-template-columns:1.3fr 1fr 1.4fr .8fr .8fr auto;gap:10px;align-items:end;margin-bottom:10px}
+.pool-rows .pool-row{display:grid;grid-template-columns:1.2fr 1fr 1.3fr .7fr .7fr 1.4fr 1.5fr auto;gap:10px;align-items:end;margin-bottom:10px}
 @media(max-width:860px){.pool-rows .pool-row{grid-template-columns:1fr 1fr}}
 /* ---------- Toast ---------- */
 #toasts{position:fixed;right:18px;bottom:18px;z-index:99;display:flex;flex-direction:column;gap:8px}
 .toast{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--accent);
-  border-radius:8px;padding:10px 16px;min-width:240px;max-width:360px;font-size:13px;box-shadow:var(--shadow);animation:slidein .2s}
+  border-radius:8px;padding:10px 16px;width:360px;min-width:0;max-width:calc(100vw - 32px);font-size:13px;overflow-wrap:anywhere;box-shadow:var(--shadow);animation:slidein .2s}
 .toast.ok{border-left-color:var(--ok)} .toast.err{border-left-color:var(--err)} .toast.warn{border-left-color:var(--warn)}
 @keyframes slidein{from{transform:translateX(20px);opacity:0}to{transform:none;opacity:1}}
 /* ---------- 细节 ---------- */
@@ -141,12 +144,73 @@ button{font-family:inherit;cursor:pointer}
 .detail-section{margin-bottom:22px}
 .detail-section h4{font-size:13px;color:var(--text-2);font-weight:600;margin-bottom:8px}
 .empty{color:var(--text-3);font-size:12.5px;padding:16px 0;text-align:center}
-.ev-row{display:flex;gap:10px;padding:5px 0;border-bottom:1px dashed var(--line-soft);font-size:12.5px}
+.ev-row{display:flex;gap:10px;min-width:0;padding:5px 0;border-bottom:1px dashed var(--line-soft);font-size:12.5px}
 .ev-row .t{color:var(--text-3);font-family:var(--mono);font-size:11px;white-space:nowrap}
-.ev-row .k{color:var(--accent-2);font-family:var(--mono);font-size:11px;white-space:nowrap;min-width:140px}
+.ev-row .k{color:var(--accent-2);font-family:var(--mono);font-size:11px;white-space:nowrap;min-width:140px;overflow:hidden;text-overflow:ellipsis}
 .tabs-mini{display:flex;gap:4px;margin:8px 0}
 .tabs-mini button{border:1px solid transparent;background:transparent;color:var(--text-3);padding:4px 10px;border-radius:6px;font-size:12.5px}
 .tabs-mini button.active{color:var(--text);background:var(--accent-soft);border-color:var(--line)}
+.chat-layout{display:grid;grid-template-columns:280px minmax(0,1fr);gap:14px;min-height:560px}
+.chat-sidebar{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);overflow:auto}
+.chat-sidebar h3{font-size:13px;padding:13px 15px;border-bottom:1px solid var(--line-soft)}
+.chat-task{display:block;width:100%;border:0;border-bottom:1px solid var(--line-soft);background:transparent;color:var(--text-2);text-align:left;padding:12px 15px;cursor:pointer}
+.chat-task:hover{background:rgba(255,255,255,.035);color:var(--text)}
+.chat-task.active{background:var(--accent-soft);color:var(--text);box-shadow:inset 3px 0 var(--accent)}
+.chat-task .chat-task-id{font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-task .chat-task-meta{font-size:11px;color:var(--text-3);margin-top:3px}
+.chat-panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;min-width:0}
+.chat-panel-head{padding:14px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.chat-panel-head .grow{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chat-stream{padding:18px;display:flex;flex-direction:column;gap:12px;overflow:auto;flex:1;min-height:430px}
+.chat-msg{max-width:88%;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--bg-soft);white-space:pre-wrap;overflow-wrap:anywhere}
+.chat-msg.user{align-self:flex-end;border-color:rgba(79,140,255,.45);background:rgba(79,140,255,.12)}
+.chat-msg.agent{align-self:flex-start;border-color:rgba(52,211,153,.3);background:rgba(52,211,153,.07)}
+.chat-msg.system{align-self:center;max-width:100%;background:transparent;border-style:dashed;color:var(--text-3);font-size:12px}
+.chat-msg .chat-msg-meta{font-size:11px;color:var(--text-3);margin-bottom:5px;display:flex;gap:8px;flex-wrap:wrap}
+@media(max-width:760px){.chat-layout{grid-template-columns:1fr}.chat-sidebar{max-height:220px}.chat-stream{min-height:360px}}
+dialog{width:680px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow:auto;border:1px solid var(--line);border-radius:var(--r);padding:0;background:var(--panel);color:var(--text);box-shadow:var(--shadow)}
+dialog::backdrop{background:rgba(2,6,23,.72);backdrop-filter:blur(3px)}
+.dialog-h{padding:15px 18px;border-bottom:1px solid var(--line-soft);font-weight:600}
+.dialog-b{padding:18px}.dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.provider-list{display:flex;flex-direction:column;gap:8px;margin-top:14px}.provider-item{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:9px 12px;background:var(--bg-soft);border:1px solid var(--line);border-radius:8px}
+.field{min-width:0}
+.field input,.field select,.field textarea{width:100%;max-width:100%;min-width:0}
+.form-row{min-width:0}
+.form-row>.field{flex:1 1 220px}
+.grid-2>*{min-width:0}
+button:focus-visible,.field input:focus-visible,.field select:focus-visible,.field textarea:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px}
+@media(max-width:720px){
+  header{padding:10px 16px;gap:8px 14px}
+  .logo{font-size:14px}
+  nav{order:3;flex:1 0 100%;margin:0 -4px;padding:0 4px 2px}
+  .head-meta{max-width:52%}
+  main{padding:20px 16px 64px}
+  .view-head{align-items:flex-start;gap:4px 10px}
+  .view-head .sub{flex:1 1 100%}
+  .card-h{align-items:flex-start}
+  .card-h .grow{width:100%;margin-left:0}
+  .form-row>.field{flex-basis:100%}
+  .form-row>button{margin-left:0!important}
+  .form-row>span.form-row{width:100%;margin-left:0!important;justify-content:flex-start}
+  .run-actions{width:100%;margin-left:0}
+  .run-detail{padding:14px}
+  .ev-row{flex-wrap:wrap}
+  .ev-row .t,.ev-row .k{min-width:0}
+  .conn{grid-template-columns:1fr}
+  .pool-rows .pool-row{grid-template-columns:1fr}
+  .team-tile .run-actions{width:auto}
+}
+@media(max-width:420px){
+  header{padding-left:12px;padding-right:12px}
+  .head-meta{width:100%;max-width:100%;margin-left:0}
+  main{padding-left:12px;padding-right:12px}
+  .card-h,.card-b{padding-left:14px;padding-right:14px}
+  nav button{padding-left:10px;padding-right:10px}
+  .btn{padding-left:11px;padding-right:11px}
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.001ms!important}
+}
 </style>
 </head>
 <body>
@@ -155,6 +219,7 @@ button{font-family:inherit;cursor:pointer}
   <div class="logo"><span class="dot"></span>Agent Hub 编排控制台</div>
   <nav>
     <button data-tab="runs" class="active">运行管理</button>
+    <button data-tab="chat">Agent 对话</button>
     <button data-tab="teams">Agent 团队</button>
     <button data-tab="connections">厂商连接</button>
   </nav>
@@ -186,6 +251,22 @@ button{font-family:inherit;cursor:pointer}
   <div style="margin-top:16px" id="runList"></div>
 </main>
 
+<!-- ============ Agent Chat ============ -->
+<main id="view-chat">
+  <div class="view-head"><h2>Agent 对话</h2><span class="sub">按 Run、任务和 Agent 隔离显示上下文；运行中的任务会自动刷新</span></div>
+  <div class="form-row" style="margin-bottom:14px">
+    <div class="field" style="min-width:240px;max-width:360px"><label>Run</label><select id="chatRunSelect"></select></div>
+    <span id="chatStatus" class="muted" style="align-self:center">选择一个 Run 查看对话</span>
+  </div>
+  <div class="chat-layout">
+    <aside class="chat-sidebar"><h3>任务上下文</h3><div id="chatTaskList"><div class="empty">暂无任务</div></div></aside>
+    <section class="chat-panel">
+      <div class="chat-panel-head"><b id="chatTitle">请选择任务</b><span id="chatTaskState"></span><span class="grow"><span id="chatAgentMeta" class="muted"></span><button class="ghost btn sm" id="chatRefresh">刷新</button></span></div>
+      <div class="chat-stream" id="chatStream"><div class="empty">左侧选择任务后，这里会显示任务说明、Agent 返回和系统消息。</div></div>
+    </section>
+  </div>
+</main>
+
 <!-- ============ Teams ============ -->
 <main id="view-teams">
   <div class="view-head"><h2>Agent 团队</h2><span class="sub">用鼠标组建项目临时团队，或选择默认团队</span></div>
@@ -211,6 +292,27 @@ button{font-family:inherit;cursor:pointer}
   </div>
 
   <div class="card">
+    <div class="card-h"><h3>自定义模型提供方</h3><span class="grow"><span class="muted">密钥只从环境变量读取</span></span></div>
+    <div class="card-b">
+      <div class="form-row" style="margin-bottom:12px"><span id="codeBuddyProbeStatus" class="muted">选择 CodeBuddy 后自动测试，只在模型下拉框显示可连通模型</span></div>
+      <form id="modelProviderForm" class="grid-2">
+        <div class="field"><label>提供方标识</label><input name="provider_id" placeholder="volc-codingplan" required></div>
+        <div class="field"><label>显示名称</label><input name="label" placeholder="火山 CodingPlan" required></div>
+        <div class="field"><label>后端</label><select name="backend"><option value="codebuddy">WorkBuddy / CodeBuddy</option></select></div>
+        <div class="field"><label>Base URL</label><input name="base_url" placeholder="从火山控制台复制完整地址" required></div>
+        <div class="field"><label>API Key 环境变量名</label><input name="api_key_env" placeholder="VOLC_CODINGPLAN_API_KEY" required></div>
+        <div class="field"><label>模型 ID（逗号分隔）</label><input name="models" placeholder="doubao-seed-code,kimi-k2.5" required></div>
+        <div class="field"><label>默认模型（可选）</label><input name="default_model" placeholder="留空由团队池决定"></div>
+        <div class="form-row" style="grid-column:1/-1;justify-content:flex-end">
+          <span class="muted" style="margin-right:auto">不会保存 API Key 本身，只保存环境变量名。</span>
+          <button class="btn" type="submit">保存提供方</button>
+        </div>
+      </form>
+      <div id="modelProvidersList" class="provider-list"></div>
+    </div>
+  </div>
+
+  <div class="card">
     <div class="card-h"><h3>可用团队</h3></div>
     <div class="card-b" style="padding:6px 8px">
       <div id="teamsList"></div>
@@ -226,17 +328,117 @@ button{font-family:inherit;cursor:pointer}
 
 <div id="toasts"></div>
 
+<dialog id="taskDialog">
+  <form id="taskForm">
+    <div class="dialog-h">发起任务</div>
+    <div class="dialog-b">
+      <div class="field" style="margin-bottom:12px"><label>任务说明</label><textarea id="taskPrompt" rows="4" required placeholder="告诉 Agent 要完成什么"></textarea></div>
+      <div class="grid-2">
+        <div class="field"><label>任务类型</label><select id="taskModeSelect"><option value="read_only">普通只读</option><option value="write">写任务</option><option value="supervisor">主管规划</option></select></div>
+        <div class="field"><label>执行后端</label><select id="taskBackendSelect"></select></div>
+        <div class="field"><label>提供方</label><select id="taskProviderSelect"><option value="">内置 / 团队默认</option></select></div>
+        <div class="field"><label>模型</label><select id="taskModelSelect"><option value="">使用团队池默认</option></select></div>
+      </div>
+      <div class="form-row" style="margin-top:10px"><span id="taskModelStatus" class="muted">选择后端后加载可用模型</span></div>
+      <div class="field" id="taskCustomModelBox" style="display:none;margin-top:12px"><label>自定义模型 ID</label><input id="taskCustomModel" placeholder="输入未列在目录中的模型 ID"></div>
+      <div id="taskWriteBox" style="display:none;margin-top:12px">
+        <div class="field"><label>write_scope（受管 worktree 内相对路径，逗号分隔）</label><input id="taskWriteScope" placeholder="src/a.py,tests/test_a.py"></div>
+      </div>
+      <div class="dialog-actions"><button class="ghost btn" id="cancelTask" type="button">取消</button><button class="btn" type="submit">发起</button></div>
+    </div>
+  </form>
+</dialog>
+
 <script>
 "use strict";
 const $=s=>document.querySelector(s);
 const $$=s=>[...document.querySelectorAll(s)];
 let currentRun="";
+let expandedRun="";
+let chatRun="";
+let chatTask="";
+const MODEL_CATALOGS={};
+let MODEL_PROVIDERS=[];
+const CODEBUDDY_PROBE_CACHE={};
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const mono=v=>`<span class="mono">${esc(v)}</span>`;
 
 async function api(path,opt){try{const r=await fetch(path,opt);const d=await r.json().catch(()=>({}));return{status:r.status,body:d};}catch(e){return{status:0,body:{error:String(e)}};}}
 function toast(msg,kind="info"){const t=document.createElement("div");t.className="toast "+kind;t.textContent=msg;
   $("#toasts").appendChild(t);setTimeout(()=>t.remove(),kind==="err"?5000:2800);}
+
+async function loadModelCatalog(backend,force=false){
+  if(!force&&MODEL_CATALOGS[backend])return MODEL_CATALOGS[backend];
+  const r=await api(`/api/model-catalog?backend=${encodeURIComponent(backend)}`);
+  const data=r.body||{backend,models:[],status:"unavailable"};
+  MODEL_CATALOGS[backend]=data;return data;
+}
+async function loadModelProviders(){
+  const r=await api("/api/model-providers");
+  MODEL_PROVIDERS=r.body?.providers||[];return MODEL_PROVIDERS;
+}
+const CODEBUDDY_PROBES={};
+async function ensureCodeBuddyProbe(providerId="",statusEl=null,force=false){
+  const scope=providerId||"__builtin__";
+  if(force)delete CODEBUDDY_PROBE_CACHE[scope];
+  if(CODEBUDDY_PROBE_CACHE[scope]){
+    const cached=CODEBUDDY_PROBE_CACHE[scope];
+    const p=cached.probe||{};
+    if(statusEl)statusEl.textContent=`已使用缓存：测试 ${p.tested||0} 个${providerId?`提供方 ${providerId}`:"内置模型"}，可用 ${p.available||0} 个`;
+    return cached;
+  }
+  if(CODEBUDDY_PROBES[scope])return CODEBUDDY_PROBES[scope];
+  const target=providerId?`提供方 ${providerId}`:"内置模型";
+  const run=(async()=>{
+    if(statusEl)statusEl.textContent=`正在自动测试 ${target}，请稍候…`;
+    const r=await api("/api/model-catalog/probe",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({backend:"codebuddy",provider_id:providerId||null})});
+    if(r.status===200){
+      MODEL_CATALOGS.codebuddy=r.body||{};
+      CODEBUDDY_PROBE_CACHE[scope]=MODEL_CATALOGS.codebuddy;
+      const p=r.body?.probe||{};
+      if(statusEl)statusEl.textContent=`已自动测试 ${p.tested||0} 个${target}，保留 ${p.available||0} 个可用模型，失败 ${p.failed||0} 个`;
+      return MODEL_CATALOGS.codebuddy;
+    }
+   if(statusEl)statusEl.textContent=r.body?.error||`${target} 连通性测试失败`;
+    const fallback=MODEL_CATALOGS.codebuddy||{status:"unavailable",models:[]};
+    CODEBUDDY_PROBE_CACHE[scope]=fallback;
+    return fallback;
+  })();
+  CODEBUDDY_PROBES[scope]=run;
+  try{return await run;}finally{delete CODEBUDDY_PROBES[scope];}
+}
+function providerLabel(providerId){
+  const p=MODEL_PROVIDERS.find(item=>item.provider_id===providerId);
+  return p?.label||providerId||"自定义提供方";
+}
+function modelSelectOptions(items,selected,providerId="",allowCustom=false,backend="codebuddy"){
+  const visible=(items||[]).filter(x=>providerId?x.provider_id===providerId:!x.provider_id);
+  const values=new Set(visible.map(x=>x.id));
+  let html='<option value="">使用团队池默认</option>';
+  const builtinLabel=backend==="codex"?"Codex 模型":(backend==="fake"?"离线模型":"内置模型 · CodeBuddy");
+  const groupLabel=providerId?`自定义模型 · ${providerLabel(providerId)}`:builtinLabel;
+  if(visible.length){
+    html+=`<optgroup label="${esc(groupLabel)}">`;
+    for(const x of visible)html+=`<option value="${esc(x.id)}"${x.id===selected?" selected":""}>${esc(x.label||x.id)}</option>`;
+    html+='</optgroup>';
+  }
+  if(selected&&selected!=="__custom__"&&!values.has(selected))html+=`<option value="${esc(selected)}" selected>${esc(selected)} · 当前配置</option>`;
+  if(allowCustom)html+='<option value="__custom__"'+(selected==="__custom__"?' selected':'')+'>手动指定模型 ID…</option>';
+  return html;
+}
+function modelOptionsHTML(backend,selected,providerId=""){
+  return modelSelectOptions(MODEL_CATALOGS[backend]?.models||[],selected,providerId,false,backend);
+}
+function providerOptionsHTML(selected="",backend="codebuddy"){
+  let html=backend==="codebuddy"?'<option value="">内置模型（CodeBuddy 默认）</option>':'<option value="">无自定义提供方</option>';
+  if(backend!=="codebuddy")return html;
+  if(MODEL_PROVIDERS.length){
+    html+='<optgroup label="自定义模型提供方">';
+    html+=MODEL_PROVIDERS.map(p=>`<option value="${esc(p.provider_id)}"${p.provider_id===selected?" selected":""}>${esc(p.label)} · ${esc(p.provider_id)}</option>`).join("");
+    html+='</optgroup>';
+  }
+  return html;
+}
 
 const STATE_PILL={COMPLETED:["ok","已完成"],SUCCEEDED:["ok","成功"],APPLIED:["ok","已应用"],SENT:["ok","已投递"],
   REVIEW:["info","待审核"],RUNNING:["ok","运行中"],READY:["violet","就绪"],ACTIVE:["info","执行中"],PENDING:["violet","排队中"],
@@ -249,6 +451,7 @@ $$("nav button").forEach(b=>b.onclick=()=>{
   $$("nav button").forEach(x=>x.classList.toggle("active",x===b));
   $$("main").forEach(m=>m.classList.toggle("active",m.id==="view-"+b.dataset.tab));
   if(b.dataset.tab==="runs")loadRuns();
+  if(b.dataset.tab==="chat")loadChatRuns();
   if(b.dataset.tab==="teams")loadTeams();
   if(b.dataset.tab==="connections")loadConnections();
 });
@@ -267,6 +470,7 @@ async function loadRuns(){
   $("#stTasks").textContent=tasks;$("#stDone").textContent=done;
   const box=$("#runList");
   if(!runs.length){box.innerHTML=`<div class="card"><div class="empty">还没有 Run —— 在上方创建第一个 Run</div></div>`;return;}
+  const keepOpen=expandedRun||currentRun;
   box.innerHTML="";
   for(const run of runs){
     const totalN=run.tasks_total||0,doneN=run.tasks_completed||0;
@@ -292,8 +496,15 @@ async function loadRuns(){
     if(btnStart)btnStart.onclick=()=>startServe(run.run_id);
     const btnStop=div.querySelector("[data-stop]");
     if(btnStop)btnStop.onclick=()=>stopServe(run.run_id);
-    if(currentRun===run.run_id)openRun(run.run_id,div,false);
     box.appendChild(div);
+    if(keepOpen===run.run_id){
+      const detail=div.querySelector(".run-detail");
+      if(detail)detail.style.display="block";
+    }
+  }
+  if(keepOpen){
+    const card=[...box.querySelectorAll(".run-card")].find(x=>x.querySelector(".run-detail")?.dataset.detail===keepOpen);
+    if(card){expandedRun=keepOpen;loadDetail(keepOpen);}
   }
 }
 $("#toggleNewRun").onclick=()=>{$("#newRunBox").style.display=$("#newRunBox").style.display==="none"?"block":"none";};
@@ -303,18 +514,20 @@ $("#newRunForm").addEventListener("submit",async e=>{e.preventDefault();
   if(r.status===200){toast("Run 已创建："+r.body.run_id,"ok");loadRuns();}
   else toast(r.body.error||"创建失败","err");});
 async function startServe(runId){
-  const teamPath=prompt(`选择启动 ${runId} 的团队配置文件\n（项目相对路径，回车用默认）：`,"config/team.yaml");
-  if(teamPath===null)return;
-  const r=await api(`/api/runs/${runId}/serve/start`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({team_path:teamPath})});
-  if(r.status===200){toast(runId+" serve 已启动","ok");}
-  else toast(r.body.error||"启动失败","err");
-  loadRuns();setTimeout(loadRuns,2000);}
+  // The Run already stores its selected team. Do not ask for a path here:
+  // falling back to config/team.yaml silently starts the wrong team and
+  // leaves tasks with no matching agent binding.
+  const r=await api(`/api/runs/${runId}/serve/start`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+  if(r.status===200){toast(runId+" serve 已启动（团队："+(r.body.team_id||"已绑定")+"）","ok");}
+ else toast(r.body.error||"启动失败","err");
+ loadRuns();setTimeout(loadRuns,2000);}
 async function stopServe(runId){
   await api(`/api/runs/${runId}/serve/stop`,{method:"POST",body:"{}"});
   toast(runId+" serve 已停止");loadRuns();}
 
 async function openRun(runId,cardEl,scroll=true){
   currentRun=runId;
+  expandedRun=runId;
   if(cardEl)$$(".run-detail").forEach(d=>d.style.display="none");
   const detail=cardEl?cardEl.querySelector(".run-detail"):null;
   if(detail){detail.style.display="block";if(scroll)detail.scrollIntoView({behavior:"smooth",block:"nearest"});}
@@ -330,6 +543,9 @@ async function loadDetail(runId){
     api(`/api/runs/${runId}/merges`),api(`/api/runs/${runId}/events`),
     api(`/api/runs/${runId}/worktree`)]);
   const wtInfo=(wt.body&&wt.body.worktree)||{};
+  const planEvents=(events.body.events||[]).filter(e=>e.kind==="plan.materialized"||e.kind==="plan.rejected");
+  const latestPlan=planEvents.length?planEvents[planEvents.length-1]:null;
+  const planStatus=latestPlan?(latestPlan.kind==="plan.materialized"?"计划已生成，子任务已派发":"计划被拒绝"):"尚未生成主管计划";
   box.innerHTML=`
     <div class="form-row" style="margin-bottom:14px">
       <button class="ghost btn sm" data-action="new">＋ 发起任务</button>
@@ -346,9 +562,10 @@ async function loadDetail(runId){
     </div>
     <div class="detail-section">
       <h4>任务</h4><div style="overflow-x:auto"><table>
-      <thead><tr><th>任务</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th>审核</th><th></th></tr></thead>
+      <thead><tr><th>任务</th><th>角色 / 后端 / 模型</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th>审核</th><th>操作</th></tr></thead>
       <tbody>${
-        (tasks.body.tasks||[]).map(t=>`<tr><td class="mono">${esc(t.task_id)}</td>
+        (tasks.body.tasks||[]).map(t=>`<tr><td><div class="mono">${esc(t.task_id)}</div><div class="muted" title="${esc(t.instruction_text||"")}" style="max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.instruction_text||"无任务说明")}</div></td>
+          <td>${esc(t.required_role_id||"")} ${t.required_backend?`· ${esc(t.required_backend)}`:""}${t.required_provider_id?` · ${esc(t.required_provider_id)}`:""}${t.required_model?` · ${esc(t.required_model)}`:""}</td>
           <td>${pill(t.state)}</td><td>${esc(t.access_mode)}</td>
           <td class="muted">${esc((t.write_scope_json||"").slice(0,40))}</td>
           <td>${t.attempt_count??""}</td>
@@ -356,8 +573,12 @@ async function loadDetail(runId){
             ?`<span style="display:inline-flex;gap:6px"><button class="btn sm" data-review="${esc(t.task_id)}" data-dec="approve">通过</button>
               <button class="ghost btn sm" data-review="${esc(t.task_id)}" data-dec="rework">打回</button></span>`
             :""}</td>
-          <td>${t.state!=="COMPLETED"&&t.state!=="CANCELLED"?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:""}</td></tr>`).join("")||`<tr><td colspan="7" class="empty">暂无任务</td></tr>`
+          <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><button class="ghost btn sm" data-chat-task="${esc(t.task_id)}">对话</button>${["ACTIVE","INTEGRATION","CANCEL_REQUESTED"].includes(t.state)?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:`<button class="ghost btn sm" data-delete="${esc(t.task_id)}">删除</button>`}</span></td></tr>`).join("")||`<tr><td colspan="8" class="empty">暂无任务</td></tr>`
       }</tbody></table></div>
+    </div>
+    <div class="detail-section"><h4>主管计划</h4>
+      <div class="ev-row"><span class="k">状态</span><span>${esc(planStatus)}</span></div>
+      ${latestPlan?`<div class="ev-row"><span class="k">详情</span><span class="mono">${esc(String(latestPlan.data_json||"").slice(0,240))}</span></div>`:""}
     </div>
     <div class="detail-section"><h4>审批请求</h4>
       ${appr.body.approvals?.length?`<div style="overflow-x:auto"><table>
@@ -392,6 +613,12 @@ async function loadDetail(runId){
     const r=await api(`/api/runs/${runId}/tasks/${b.dataset.cancel}/cancel`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-cancel"})});
     if(r.status===200){toast("已请求取消","ok");loadDetail(runId);}else toast(r.body.error,"err");});
+  box.querySelectorAll("[data-delete]").forEach(b=>b.onclick=async()=>{
+    if(!confirm(`删除任务 ${b.dataset.delete}？执行记录将被移除，但事件审计会保留。`))return;
+    const r=await api(`/api/runs/${runId}/tasks/${b.dataset.delete}/delete`,
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-delete"})});
+    if(r.status===200){toast("任务已删除","ok");loadDetail(runId);loadRuns();}else toast(r.body.error||"删除失败","err");});
+  box.querySelectorAll("[data-chat-task]").forEach(b=>b.onclick=()=>openChat(runId,b.dataset.chatTask));
   box.querySelectorAll("[data-review]").forEach(b=>b.onclick=async()=>{
     const dec=b.dataset.dec;
     if(dec==="approve"&&!confirm("通过后写任务产出将真实合并进主仓库，且不可撤销。继续？"))return;
@@ -402,34 +629,130 @@ async function loadDetail(runId){
     else toast(r.body.error||"操作失败","err");});
 }
 async function newTaskForm(runId){
-  const mode=await new Promise(res=>{
-    const m=prompt("任务类型：\n1 = 只读（read_only）\n2 = 写（write，需受管 worktree + write_scope）\n回车 = 只读","1");
-    res(m==="2"?"write":"read_only");
-  });
-  const promptText=prompt("任务说明 prompt：");
-  if(promptText===null)return;
-  let body={prompt:promptText,access_mode:mode,timeout_seconds:120};
-  if(mode==="write"){
-    const wt=await api(`/api/runs/${runId}/worktree`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-    if(wt.status!==200){toast((wt.body&&wt.body.error)||"准备受管 worktree 失败","err");return;}
-    const cwd=prompt("cwd（受管 worktree 路径，回车用自动准备的）：",wt.body.worktree||"");
-    if(cwd===null)return;
-    const scopeRaw=prompt("write_scope（逗号分隔的受管范围内相对路径，如 demo/a.txt,demo/b.txt）：");
-    if(scopeRaw===null)return;
-    const scope=scopeRaw.split(",").map(s=>s.trim()).filter(Boolean);
-    if(!scope.length){toast("write_scope 不能为空","err");return;}
-    Object.assign(body,{cwd:cwd||wt.body.worktree,write_scope:scope});
+  const dialog=$("#taskDialog"),form=$("#taskForm"),backend=$("#taskBackendSelect");
+  const provider=$("#taskProviderSelect"),model=$("#taskModelSelect");
+  const mode=$("#taskModeSelect"),status=$("#taskModelStatus");
+  const modelInfo=await api(`/api/runs/${runId}/models`);
+  const teamModels=modelInfo.body?.models||[];
+  backend.innerHTML='<option value="">由调度器选择</option><option value="codex">OpenAI Codex</option><option value="codebuddy">WorkBuddy / CodeBuddy</option><option value="fake">Fake（离线）</option>';
+  provider.innerHTML=providerOptionsHTML("",backend.value);
+  mode.value="read_only";$("#taskPrompt").value="";$("#taskCustomModelBox").style.display="none";
+  $("#taskWriteBox").style.display="none";$("#taskCustomModel").value="";$("#taskWriteScope").value="";
+
+  async function refresh(force=false){
+    const selectedBackend=backend.value||"fake";
+    const selectedProvider=selectedBackend==="codebuddy"?provider.value:"";
+    const previous=model.value;
+    status.textContent="正在加载模型目录…";
+    const catalog=selectedBackend==="codebuddy"&&force
+      ?await ensureCodeBuddyProbe(selectedProvider,status,true)
+      :await loadModelCatalog(selectedBackend,force);
+    const items=(catalog.models||[]).filter(x=>selectedProvider?x.provider_id===selectedProvider:!x.provider_id).map(x=>({...x}));
+    for(const item of teamModels){
+      if(item.backend===selectedBackend&&String(item.provider_id||"")===selectedProvider&&!items.some(x=>x.id===item.model))items.push({id:item.model,label:`${item.model} · 团队默认`,source:"team"});
+    }
+    model.innerHTML=modelSelectOptions(items,previous,selectedProvider,true,selectedBackend);
+    if(previous&&[...model.options].some(o=>o.value===previous))model.value=previous;
+    $("#taskCustomModelBox").style.display=model.value==="__custom__"?"block":"none";
+    if(catalog.probe){
+      const p=catalog.probe;
+      status.textContent=`已自动测试 ${p.tested||0} 个模型，保留 ${p.available||0} 个可用模型，失败 ${p.failed||0} 个`;
+    }else status.textContent=catalog.status==="ok"?`已加载 ${items.length} 个模型`:(catalog.error||"模型目录暂不可用，可选择自定义模型");
   }
-  const r=await api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-  if(r.status===200){toast("任务已发起："+r.body.task_id,"ok");loadDetail(runId);}
-  else toast(r.body.error||"发起失败","err");
+  function updateMode(){
+    $("#taskWriteBox").style.display=mode.value==="write"?"block":"none";
+    if(mode.value==="supervisor")backend.value="codex";
+    provider.innerHTML=providerOptionsHTML("",backend.value);
+    provider.disabled=backend.value!=="codebuddy";
+    refresh();
+  }
+  backend.onchange=async()=>{
+    provider.innerHTML=providerOptionsHTML("",backend.value);
+    provider.disabled=backend.value!=="codebuddy";
+    await refresh(true);
+  };
+  provider.onchange=()=>refresh(true);
+  model.onchange=()=>{$("#taskCustomModelBox").style.display=model.value==="__custom__"?"block":"none";};
+  mode.onchange=updateMode;
+  $("#cancelTask").onclick=()=>dialog.close("cancel");
+  provider.disabled=true;
+  await refresh();
+  dialog.showModal();
+  await new Promise(resolve=>{
+    form.onsubmit=async e=>{
+      e.preventDefault();
+      const promptText=$("#taskPrompt").value.trim();
+      if(!promptText){toast("任务说明不能为空","err");return;}
+      const selectedMode=mode.value, selectedBackend=backend.value;
+      const selectedModel=model.value==="__custom__"?$("#taskCustomModel").value.trim():model.value;
+      if(model.value==="__custom__"&&!selectedModel){toast("请输入自定义模型 ID","err");return;}
+      const body={mode:selectedMode==="supervisor"?"supervisor":"worker",prompt:promptText,access_mode:selectedMode,timeout_seconds:120};
+      if(selectedBackend)body.required_backend=selectedBackend;
+      if(selectedModel)body.required_model=selectedModel;
+      if(selectedBackend==="codebuddy"&&provider.value)body.required_provider_id=provider.value;
+      if(selectedMode==="supervisor"||selectedMode==="write"){
+        const wt=await api(`/api/runs/${runId}/worktree`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+        if(wt.status!==200){toast((wt.body&&wt.body.error)||"准备受管 worktree 失败","err");return;}
+        body.cwd=wt.body.worktree;
+        if(selectedMode==="write"){
+          const scope=$("#taskWriteScope").value.split(",").map(s=>s.trim()).filter(Boolean);
+          if(!scope.length){toast("write_scope 不能为空","err");return;}
+          body.write_scope=scope;
+        }
+      }
+      const r=await api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(r.status!==200){toast(r.body.error||"发起失败","err");return;}
+      toast("任务已发起："+r.body.task_id,"ok");dialog.close("submitted");
+    };
+    dialog.onclose=()=>{form.onsubmit=null;resolve();};
+  });
+  loadDetail(runId);
 }
 async function control(runId,action){
   const r=await api(`/api/runs/${runId}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-"+action})});
   if(r.status===200)toast(action==="pause"?"已暂停调度":"已恢复调度","ok");else toast(r.body.error,"err");}
 
+/* ============ Agent Chat ============ */
+function openChat(runId,taskId=""){
+  chatRun=runId;chatTask=taskId;
+  const navButton=$("nav button[data-tab='chat']");
+  if(navButton)navButton.click();
+  else loadChat(runId,taskId);
+}
+async function loadChatRuns(){
+  const r=await api("/api/runs");
+  if(r.status!==200)return;
+  const select=$("#chatRunSelect"),runs=r.body.runs||[],previous=chatRun;
+  select.innerHTML=runs.map(x=>`<option value="${esc(x.run_id)}">${esc(x.run_id)} · ${esc(x.team_id||"")}</option>`).join("");
+  if(!runs.length){chatRun="";$("#chatTaskList").innerHTML='<div class="empty">暂无 Run</div>';$("#chatStream").innerHTML='<div class="empty">暂无可显示的对话。</div>';return;}
+  chatRun=runs.some(x=>x.run_id===previous)?previous:runs[0].run_id;
+  select.value=chatRun;
+  await loadChat(chatRun,chatTask);
+}
+$("#chatRunSelect").onchange=()=>{chatRun=$("#chatRunSelect").value;chatTask="";loadChat(chatRun,"");};
+$("#chatRefresh").onclick=()=>chatRun&&loadChat(chatRun,chatTask);
+async function loadChat(runId,taskId=""){
+  if(!runId)return;
+  const r=await api(`/api/runs/${encodeURIComponent(runId)}/chat`);
+  if(r.status!==200){toast(r.body.error||"加载对话失败","err");return;}
+  const tasks=r.body.chat?.tasks||[],list=$("#chatTaskList");
+  if(!tasks.length){list.innerHTML='<div class="empty">这个 Run 还没有任务。</div>';$("#chatStream").innerHTML='<div class="empty">暂无对话。</div>';return;}
+  const selected=tasks.some(x=>x.task_id===taskId)?taskId:(tasks.some(x=>x.task_id===chatTask)?chatTask:tasks[0].task_id);
+  chatTask=selected;
+  list.innerHTML=tasks.map(t=>`<button class="chat-task${t.task_id===selected?" active":""}" data-chat-select="${esc(t.task_id)}"><div class="chat-task-id">${esc(t.task_id)}</div><div class="chat-task-meta">${esc(t.role_id||"worker")} · ${pill(t.state)}</div></button>`).join("");
+  list.querySelectorAll("[data-chat-select]").forEach(b=>b.onclick=()=>{chatTask=b.dataset.chatSelect;loadChat(runId,chatTask);});
+  const task=tasks.find(x=>x.task_id===selected);
+  $("#chatTitle").textContent=task.task_id;
+  $("#chatTaskState").innerHTML=pill(task.state);
+  const agentMessages=(task.messages||[]).filter(x=>x.role==="agent");
+  const agentNames=[...new Set(agentMessages.map(x=>[x.agent_id,x.backend,x.model].filter(Boolean).join(" · ")))].filter(Boolean);
+  $("#chatAgentMeta").textContent=agentNames.length?agentNames.join(" / "):"尚未绑定 Agent";
+  $("#chatStatus").textContent=`${tasks.length} 个任务 · 每 2.5 秒自动刷新`;
+  $("#chatStream").innerHTML=(task.messages||[]).map(m=>`<article class="chat-msg ${esc(m.role||"system")}"><div class="chat-msg-meta"><span>${m.role==="agent"?"Agent":m.role==="user"?"任务":"系统"}</span>${m.agent_id?`<span>${esc(m.agent_id)}</span>`:""}${m.backend?`<span>${esc(m.backend)}${m.model?` · ${esc(m.model)}`:""}</span>`:""}<span>${esc((m.state||"").toUpperCase())}</span><span>${esc((m.created_at||"").slice(0,19).replace("T"," "))}</span></div><div>${esc(m.text||"")}</div></article>`).join("");
+}
+
 /* ============ Teams ============ */
-const BACKENDS=[["fake","Fake（离线）"],["codex","OpenAI Codex"],["codebuddy","CodeBuddy（中国站）"]];
+const BACKENDS=[["fake","Fake（离线）"],["codex","OpenAI Codex"],["codebuddy","WorkBuddy / CodeBuddy"]];
 const ROLES=[["worker","Worker 执行"],["supervisor","Supervisor 审核"]];
 let poolRows=[{backend:"fake",role_id:"worker",pool_id:"pool-fake",count:2,max_count:2}];
 
@@ -440,20 +763,51 @@ function poolRowHTML(p){
     <div class="field"><label>池标识 pool_id</label><input class="p-id" value="${esc(p.pool_id||"")}" placeholder="pool-1"></div>
     <div class="field"><label>初始数</label><input class="p-count" type="number" min="1" value="${p.count||1}"></div>
     <div class="field"><label>上限</label><input class="p-max" type="number" min="1" value="${p.max_count||p.count||1}"></div>
+    <div class="field"><label>提供方</label><select class="p-provider"${p.backend!=="codebuddy"?" disabled":""}>${providerOptionsHTML(p.provider_id||"",p.backend)}</select></div>
+    <div class="field"><label>模型（默认）</label><select class="p-model">${modelOptionsHTML(p.backend,p.model||"",p.provider_id||"")}</select></div>
     <button class="ghost btn sm" data-del style="margin-bottom:2px">删除</button></div>`;
 }
-function renderPoolRows(){
-  const box=$("#poolRows");box.innerHTML="";
+function renderPoolRows(sync=false){
+  if(sync)syncPoolRowsFromDOM();
+ const box=$("#poolRows");box.innerHTML="";
   poolRows.forEach((p,i)=>{const d=document.createElement("div");d.innerHTML=poolRowHTML(p);
-    d.querySelector("[data-del]").onclick=()=>{poolRows.splice(i,1);renderPoolRows();};box.appendChild(d);});
+    const backend=d.querySelector(".p-backend"),provider=d.querySelector(".p-provider"),model=d.querySelector(".p-model");
+    backend.onchange=async()=>{
+      provider.disabled=backend.value!=="codebuddy";
+      if(provider.disabled)provider.value="";
+      if(backend.value==="codebuddy")await ensureCodeBuddyProbe(provider.value,$("#codeBuddyProbeStatus"));
+      else await loadModelCatalog(backend.value);
+      model.innerHTML=modelOptionsHTML(backend.value,"",provider.value);renderPreview();
+    };
+    provider.onchange=async()=>{
+      if(backend.value==="codebuddy")await ensureCodeBuddyProbe(provider.value,$("#codeBuddyProbeStatus"));
+      model.innerHTML=modelOptionsHTML(backend.value,"",provider.value);renderPreview();
+    };
+    d.querySelectorAll("input,select").forEach(x=>x.addEventListener("change",()=>{syncPoolRowsFromDOM();renderPreview();}));
+    d.querySelector("[data-del]").onclick=()=>{syncPoolRowsFromDOM();poolRows.splice(i,1);renderPoolRows();};box.appendChild(d);});
   renderPreview();
+}
+function syncPoolRowsFromDOM(){
+  const rows=[...$("#poolRows").querySelectorAll(".pool-row")];
+  if(!rows.length)return;
+  poolRows=rows.map(row=>({
+    backend:row.querySelector(".p-backend").value,
+    role_id:row.querySelector(".p-role").value,
+    pool_id:row.querySelector(".p-id").value,
+    count:Math.max(1,parseInt(row.querySelector(".p-count").value)||1),
+    max_count:Math.max(1,parseInt(row.querySelector(".p-max").value)||1),
+    provider_id:row.querySelector(".p-provider").value||null,
+    model:row.querySelector(".p-model").value||null
+  }));
 }
 function collectTeam(){
   const pools=[...$("#poolRows").querySelectorAll(".pool-row")].map(row=>({
     pool_id:row.querySelector(".p-id").value||("pool-"+Math.random().toString(16).slice(2,6)),
     backend:row.querySelector(".p-backend").value,role_id:row.querySelector(".p-role").value,
     count:Math.max(1,parseInt(row.querySelector(".p-count").value)||1),
-    max_count:Math.max(1,parseInt(row.querySelector(".p-max").value)||1)}));
+    max_count:Math.max(1,parseInt(row.querySelector(".p-max").value)||1),
+    provider_id:row.querySelector(".p-provider").value||null,
+    model:row.querySelector(".p-model").value.trim()||null}));
   return{schema_version:1,team_id:$("#newTeamId").value||"ad-hoc-team",bootstrap_supervisor:"supervisor",
     roles:[{role_id:"worker",version:1,title:"实现 Worker",required_capabilities:["read","write","test"]},
            {role_id:"supervisor",version:1,title:"Supervisor 审核",required_capabilities:["plan","review"]}],
@@ -461,9 +815,10 @@ function collectTeam(){
 }
 function renderPreview(){$("#teamPreview").textContent=JSON.stringify(collectTeam(),null,2);}
 $("#newTeamId").addEventListener("input",renderPreview);
-$("#addPool").onclick=()=>{poolRows.push({backend:"fake",role_id:"worker",count:1,max_count:1});renderPoolRows();};
+$("#addPool").onclick=()=>{syncPoolRowsFromDOM();poolRows.push({backend:"fake",role_id:"worker",count:1,max_count:1});renderPoolRows();};
 async function loadTeams(){
-  renderPoolRows();
+  await Promise.all([loadModelCatalog("codex"),loadModelCatalog("codebuddy"),loadModelProviders()]);
+  renderPoolRows(true);
   const t=await api("/api/teams");const list=$("#teamsList");
   list.innerHTML="";
   for(const team of(t.body.teams||[])){
@@ -474,7 +829,7 @@ async function loadTeams(){
           <b>${esc(team.team_id)}</b>
           <span class="pill ${team.source==="default"?"violet":"info"}">${team.source==="default"?"默认":"已保存"}</span>
         </div>
-        <div>${pools.map(p=>`<span class="pool-tag"><b>${esc(p.backend)}</b> ×${p.count} · ${esc(p.role_id)}</span>`).join("")||'<span class="muted">默认 config/team.yaml</span>'}</div>
+      <div>${pools.map(p=>`<span class="pool-tag"><b>${esc(p.backend)}</b> ×${p.count} · ${esc(p.role_id)}${p.provider_id?` · ${esc(p.provider_id)}`:""}${p.model?` · ${esc(p.model)}`:" · 默认模型"}</span>`).join("")||'<span class="muted">默认 config/team.yaml</span>'}</div>
       </div>
       <div class="run-actions">
         ${pools.length?`<button class="ghost btn sm" data-edit='${esc(JSON.stringify(team.team||{}))}'>载入编辑器</button>`:""}
@@ -482,11 +837,37 @@ async function loadTeams(){
     if(pools.length)div.querySelector("[data-edit]").onclick=()=>{
       const data=JSON.parse(div.querySelector("[data-edit]").dataset.edit.replace(/&quot;/g,'"'));
       $("#newTeamId").value=data.team_id;
-      poolRows=(data.agent_pools||[]).map(p=>({backend:p.backend,role_id:p.role_id,pool_id:p.pool_id,count:p.count,max_count:p.max_count}));
+      poolRows=(data.agent_pools||[]).map(p=>({backend:p.backend,role_id:p.role_id,pool_id:p.pool_id,count:p.count,max_count:p.max_count,provider_id:p.provider_id||null,model:p.model||null}));
       renderPoolRows();};
     list.appendChild(div);
   }
+  renderModelProviders();
 }
+function renderModelProviders(){
+  const box=$("#modelProvidersList");box.innerHTML="";
+  if(!MODEL_PROVIDERS.length){box.innerHTML='<div class="empty">还没有自定义提供方</div>';return;}
+  for(const p of MODEL_PROVIDERS){
+    const item=document.createElement("div");item.className="provider-item";
+    const models=(p.models||[]).map(x=>x.label||x.id).join("、");
+    item.innerHTML=`<div><b>${esc(p.label)}</b><span class="muted"> · ${esc(p.provider_id)} · ${esc(p.base_url)}</span><div class="muted">模型：${esc(models)}</div></div><button class="ghost btn sm" data-remove-provider="${esc(p.provider_id)}">删除</button>`;
+    item.querySelector("[data-remove-provider]").onclick=async()=>{
+      if(!confirm(`删除提供方 ${p.label}？`))return;
+      const r=await api(`/api/model-providers/${encodeURIComponent(p.provider_id)}`,{method:"DELETE"});
+      if(r.status===200){toast("提供方已删除","ok");delete CODEBUDDY_PROBE_CACHE[p.provider_id];await loadModelProviders();renderModelProviders();syncPoolRowsFromDOM();renderPoolRows();}
+      else toast(r.body.error||"删除失败","err");
+    };
+    box.appendChild(item);
+  }
+}
+$("#modelProviderForm").addEventListener("submit",async e=>{
+  e.preventDefault();
+  const data=Object.fromEntries(new FormData(e.target).entries());
+  data.models=String(data.models||"").split(",").map(x=>x.trim()).filter(Boolean).map(id=>({id,label:id}));
+  if(!data.default_model)data.default_model=null;
+  const r=await api("/api/model-providers",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});
+  if(r.status===200){toast("模型提供方已保存","ok");e.target.reset();delete CODEBUDDY_PROBE_CACHE[data.provider_id||"__builtin__"];await loadModelProviders();await loadModelCatalog("codebuddy",true);renderModelProviders();syncPoolRowsFromDOM();renderPoolRows();}
+  else toast(r.body.error||"保存失败","err");
+});
 async function saveTeam(asDefault){
   const team=collectTeam();
   const r=await api("/api/teams",{method:"POST",headers:{"Content-Type":"application/json"},
@@ -516,7 +897,7 @@ async function loadConnections(){
       ${x.login_capable && x.logged_in!==true ? `
         <div style="margin:10px 0 4px">
           <button class="btn sm" data-login="${esc(x.backend)}">一键登录授权</button>
-          <span class="muted" style="margin-left:8px">点击后会在桌面打开登录窗口</span>
+          <span class="muted" style="margin-left:8px">${x.backend==="codebuddy"?"后台打开中国站授权页":"打开登录授权窗口"}</span>
         </div>`:''}
       ${x.login_status_hint?`<div class="muted" style="margin-top:6px">${esc(x.login_status_hint)}</div>`:""}
       ${x.note?`<div class="muted" style="margin-top:8px">${esc(x.note)}</div>`:""}
@@ -529,11 +910,49 @@ $("#connList").addEventListener("click",async e=>{
   const btn=e.target.closest("[data-login]");
   if(!btn)return;
   const backend=btn.dataset.login;
-  btn.disabled=true;btn.textContent="正在打开登录窗口…";
+  if(backend==="codebuddy"){
+    let popup=window.open('about:blank','_blank');
+    if(popup)popup.opener=null;
+    const panel=document.createElement('div');
+    btn.parentElement.after(panel);
+    btn.disabled=true;
+    panel.textContent='正在获取授权链接…';
+    try{
+      const started=await api('/api/connections/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backend})});
+      if(!started.body.ok)throw new Error('无法启动授权');
+      const poll=async()=>{
+        try{
+          const result=await api('/api/connections/login-status');
+          if(result.status!==200)throw new Error('无法获取授权状态');
+          const flow=result.body;
+          panel.textContent=flow.message||'正在获取授权链接…';
+          if(flow.state==='waiting'&&flow.url){
+            const url=new URL(flow.url);
+            if(url.protocol!=='https:'||url.hostname!=='copilot.tencent.com')throw new Error('授权地址无效');
+            const link=document.createElement('a');
+            link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';
+            link.className='btn sm';link.textContent='打开中国站登录授权页';
+            panel.appendChild(link);
+            if(popup){popup.location.replace(url.href);popup=null;}
+          }
+          if(['completed','failed','idle'].includes(flow.state)){
+            btn.disabled=false;
+            if(popup){popup.close();popup=null;}
+            if(flow.state==='completed')await loadConnections();
+            return;
+          }
+          setTimeout(poll,1500);
+        }catch(err){panel.textContent=err.message;btn.disabled=false;}
+      };
+      await poll();
+    }catch(err){panel.textContent=err.message;btn.disabled=false;}
+    return;
+  }
+  btn.disabled=true;btn.textContent=backend==="codebuddy"?"正在打开授权页…":"正在打开登录窗口…";
   const r=await api("/api/connections/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({backend})});
   if(r.status===200&&r.body.ok){
     toast(backend==="codebuddy"
-      ?"登录窗口已打开：等 CodeBuddy 启动后，在窗口里输入 /login 回车，浏览器会自动弹出授权页。完成后回本页点「重新探测」。"
+      ?"授权页正在后台打开：直接在浏览器完成登录即可，完成后回本页点「重新探测」。"
       :"登录窗口已打开：浏览器会弹出授权页（或按窗口内提示操作）。完成后回本页点「重新探测」。","ok");
   } else {
     toast((r.body&&(r.body.message||r.body.error))||"打开登录窗口失败","err");
@@ -548,7 +967,8 @@ $("#connList").addEventListener("click",async e=>{
   await loadRuns();loadTeams();loadConnections();
   const init=st.body.run_id;
   if(init){currentRun=init;const card=$("[data-detail='"+init+"']");if(card){/* 已渲染时自动展开 */}}
-  setInterval(()=>{if($("nav button.active").dataset.tab==="runs")loadRuns();},8000);
+  setInterval(()=>{if($("nav button.active")?.dataset.tab==="runs")loadRuns();},8000);
+  setInterval(()=>{if($("nav button.active")?.dataset.tab==="chat"&&chatRun)loadChat(chatRun,chatTask);},2500);
 })();
 </script>
 </body>

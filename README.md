@@ -2,7 +2,7 @@
 
 这是一个本地多 Agent 编排器，目标是让 Codex 与 CodeBuddy/WorkBuddy 在同一项目中承担可配置的主管、执行和审核职位。
 
-当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3（Beta）已完成并签字（`stage3: complete Beta`，见 tag `stage3-beta-complete`）。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径）；Beta 再补项 B1–B3（金额预算、审批原子消费、Outbox 重试）已在本阶段内完成。阶段 3 退出条件 E1–E7 PASS，E8（30 分钟干净 Windows 安装演示）经决策跳过（开发自用），全量 253 项测试通过。阶段 3 已具备真实账号证据：E2 真实 20 场景 20/20、E3 真实 drain 孤儿进程/worktree/锁为 0、E5 codex 真实注入语料 4/4 违规 0。
+当前状态：**阶段 0 已 GO；阶段 1 已通过；阶段 2（MVP）已整改完成并重新签字 PASS；阶段 3（Beta）历史签字完成，目前在其基础上推进主管任务入口与模型选择，状态为 `stage3: checkpoint supervisor entry`。** 审计发现的 3 项 P0 与 MVP 必需 P1 已全部修复（authority fencing、workspace 边界、merge/git/outbox 原子闭环、真实写任务、超时/脱敏、终态口径）；Beta 再补项 B1–B3（金额预算、审批原子消费、Outbox 重试）已在本阶段内完成。阶段 3 退出条件 E1–E7 PASS，E8（30 分钟干净 Windows 安装演示）经决策跳过（开发自用），当前全量 301 项测试通过。阶段 3 已具备真实账号证据：E2 真实 20 场景 20/20、E3 真实 drain 孤儿进程/worktree/锁为 0、E5 codex 真实注入语料 4/4 违规 0。
 
 当前状态入口：[PROJECT_PROGRESS.md](PROJECT_PROGRESS.md)。开发纪律见 [AGENTS.md](AGENTS.md)，安装与 30 分钟演示见 [docs/INSTALL.md](docs/INSTALL.md)，审计原文与 WorkBuddy 对账分别见 [STAGE2_AUDIT_FINDINGS.md](STAGE2_AUDIT_FINDINGS.md) 和 [STAGE2_AUDIT_RESPONSE.md](STAGE2_AUDIT_RESPONSE.md)。
 
@@ -95,7 +95,7 @@
 .\.venv\Scripts\python.exe -m orchestrator auth codebuddy
 ```
 
-CodeBuddy 已固定使用中国站（`copilot.tencent.com`，SDK 环境 `internal`），不会跳转到国际站。命令只在终端显示厂商的一次性登录地址，不会把令牌写入项目或日志。
+CodeBuddy 已固定使用中国站（`copilot.tencent.com`，SDK 环境 `internal`），不会跳转到国际站。网页「一键登录授权」会在后台打开一次性授权页；手动执行 `auth codebuddy` 时也可加 `--open-browser`。不会把令牌写入项目或日志。
 
 Windows 下项目会优先使用 `.agent-hub/tools/` 中固定版本的官方 CodeBuddy CLI。真实 PoC 的 Worker 只获得 `StructuredOutput` 工具；模型返回结构化内容后，由 Adapter 严格按声明路径和精确字节契约落盘，再由 Git Manager 校验实际 diff。Codex 运行强制并验证 `chatgpt` 登录方式，发现 API Key 认证不会继续。
 

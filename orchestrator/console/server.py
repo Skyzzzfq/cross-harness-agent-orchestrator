@@ -5,8 +5,9 @@
 - Teams：默认 team + 已保存 team；鼠标组建临时 team（backend/role/count）。
 - Connections：探测 codex / codebuddy 登录态并引导登录（不存储凭证）。
 
-协调写操作（取消/暂停/恢复）在操作时临时 acquire controller/authority，
-serve 子进程持权期间返回 busy。发起任务不需要协调权。
+协调写操作（取消/暂停/恢复）在操作时临时 acquire controller/authority；
+人工审核/删除可在 serve 持权期间复用当前 fencing token，其余操作仍返回 busy。
+发起任务不需要协调权。
 
 用法：
     & '.venv\\Scripts\\python.exe' -m orchestrator console --port 8080
@@ -22,9 +23,10 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from orchestrator.console.serve_manager import ServeProcessManager
+from orchestrator.core.models import AuthorityToken, ControllerToken
 from orchestrator.storage.sqlite_store import (
     FencedAuthorityError,
     FencedControllerError,
@@ -73,7 +75,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     # -- 路由 ---------------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/api/connections/login-status":
+            from orchestrator.console.login_flow import status
+            self._send_json(status(self.server.project_root))
+            return
         if path in {"/", "/index.html"}:
             self._serve_index()
             return
@@ -86,6 +93,12 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/teams":
             self._get_teams()
             return
+        if path == "/api/model-catalog":
+            self._get_model_catalog(parse_qs(parsed.query))
+            return
+        if path == "/api/model-providers":
+            self._get_model_providers()
+            return
         if path == "/api/runs":
             self._get_runs()
             return
@@ -93,7 +106,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             parts = path.strip("/").split("/")
             # GET /api/runs/{run_id}/serve/status
             if len(parts) >= 5 and parts[3] == "serve" and parts[4] == "status":
-                self._send_json(self.server.serve_manager.status(parts[2]))
+                self._send_json(self._serve_status(parts[2]))
                 return
             self._get_run_resource(path)
             return
@@ -108,11 +121,34 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if path == "/api/teams":
             self._save_team(body)
             return
+        if path == "/api/model-providers":
+            self._save_model_provider(body)
+            return
+        if path == "/api/model-catalog/probe":
+            self._probe_model_catalog(body)
+            return
         if path == "/api/connections/login":
             self._login_connection(body)
             return
         if path.startswith("/api/runs/"):
             self._post_run_action(path, body)
+            return
+        self._send_error_json(404, "not found")
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        prefix = "/api/model-providers/"
+        if path.startswith(prefix):
+            provider_id = path[len(prefix):].strip()
+            from orchestrator.console.settings import delete_model_provider
+
+            if not provider_id:
+                self._send_error_json(400, "provider_id must not be empty")
+                return
+            if not delete_model_provider(self.server.project_root, provider_id):
+                self._send_error_json(404, "model provider not found")
+                return
+            self._send_json({"ok": True, "provider_id": provider_id})
             return
         self._send_error_json(404, "not found")
 
@@ -150,7 +186,11 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_error_json(400, "backend must be codex or codebuddy")
             return
         try:
-            result = launch_login(self.server.project_root, backend)
+            if backend == "codebuddy":
+                from orchestrator.console.login_flow import start
+                result = start(self.server.project_root)
+            else:
+                result = launch_login(self.server.project_root, backend)
         except Exception as exc:  # noqa: BLE001
             self._send_error_json(500, f"{type(exc).__name__}: {exc}")
             return
@@ -183,13 +223,66 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
         self._send_json({"teams": list_saved_teams(self.server.project_root)})
 
+    def _get_model_catalog(self, query: dict[str, list[str]]) -> None:
+        from orchestrator.console.model_catalog import get_model_catalog
+
+        backend = str((query.get("backend") or [""])[0]).strip().lower()
+        if not backend:
+            self._send_error_json(400, "backend query parameter is required")
+            return
+        self._send_json(
+            {"backend": backend, **get_model_catalog(self.server.project_root, backend)}
+        )
+
+    def _get_model_providers(self) -> None:
+        from orchestrator.console.settings import load_model_providers
+
+        self._send_json(
+            {"providers": load_model_providers(self.server.project_root)}
+        )
+
+    def _save_model_provider(self, body: dict[str, Any]) -> None:
+        from orchestrator.console.settings import save_model_provider
+
+        try:
+            provider = save_model_provider(self.server.project_root, body)
+        except ValueError as exc:
+            self._send_error_json(400, str(exc))
+            return
+        self._send_json({"ok": True, "provider": provider})
+
+    def _probe_model_catalog(self, body: dict[str, Any]) -> None:
+        from orchestrator.console.model_catalog import probe_codebuddy_models
+
+        backend = str(body.get("backend") or "").strip().lower()
+        if backend in {"workbuddy", "codebuddy"}:
+            backend = "codebuddy"
+        if backend != "codebuddy":
+            self._send_error_json(
+                400, "only the codebuddy model catalog supports connectivity probing"
+            )
+            return
+        provider_id = str(body.get("provider_id") or "").strip() or None
+        try:
+            self._send_json(
+                {
+                    "backend": backend,
+                    **probe_codebuddy_models(
+                        self.server.project_root, provider_id=provider_id
+                    ),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - do not expose probe details
+            self._send_error_json(
+                500, f"{type(exc).__name__}: model probe failed"
+            )
+
     def _get_runs(self) -> None:
         store = self.server.store
         rows = store.connection.execute(
             "SELECT run_id, team_id, control_state, created_at FROM runs "
             "ORDER BY created_at, run_id"
         ).fetchall()
-        serve_status = self.server.serve_manager.status()["runs"]
         runs: list[dict[str, Any]] = []
         for row in rows:
             rid = str(row["run_id"])
@@ -213,10 +306,28 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     "created_at": str(row["created_at"]),
                     "tasks_total": total,
                     "tasks_completed": completed,
-                    "running": serve_status.get(rid, {}).get("running", False),
+                    "running": self._serve_status(rid).get("running", False),
                 }
             )
         self._send_json({"runs": runs})
+
+    def _serve_status(self, run_id: str | None = None) -> dict[str, Any]:
+        """Combine local child-process state with the persisted serve lease."""
+        status = self.server.serve_manager.status(run_id)
+        if run_id is None:
+            return status
+        active = self.server.store.active_run_controller(run_id)
+        if (
+            run_id not in self.server._serve_stopped
+            and active is not None
+            and str(active["owner_id"]).startswith("serve-")
+        ):
+            status = dict(status)
+            status["run_id"] = run_id
+            status["running"] = True
+            status["controller_owner"] = str(active["owner_id"])
+            status["controller_expires_at"] = str(active["expires_at"])
+        return status
 
     def _get_run_resource(self, path: str) -> None:
         parts = path.strip("/").split("/")
@@ -234,11 +345,69 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             elif resource == "tasks":
                 payload = _rows(
                     store.connection.execute(
-                        "SELECT * FROM tasks WHERE run_id=? "
+                        "SELECT t.*, d.required_role_id, d.required_backend, "
+                        "d.required_model, d.required_provider_id, "
+                        "d.instruction_text, d.cwd, "
+                        "(SELECT COUNT(*) FROM attempts a WHERE a.task_id=t.task_id) "
+                        "AS attempt_count "
+                        "FROM tasks t JOIN task_dispatch_specs d ON d.task_id=t.task_id "
+                        "WHERE t.run_id=? "
                         "ORDER BY created_at, task_id",
                         (run_id,),
                     ).fetchall()
                 )
+            elif resource == "models":
+                run = store.connection.execute(
+                    "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
+                ).fetchone()
+                if run is None:
+                    self._send_error_json(404, "run not found")
+                    return
+                from orchestrator.console.settings import list_saved_teams
+                from orchestrator.core.config import load_team_spec
+
+                team_id = str(run["team_id"] or "")
+                team = next(
+                    (
+                        item
+                        for item in list_saved_teams(self.server.project_root)
+                        if str(item.get("team_id") or "") == team_id
+                    ),
+                    None,
+                )
+                if team is None:
+                    team = next(
+                        (
+                            item
+                            for item in list_saved_teams(self.server.project_root)
+                            if item.get("source") != "saved"
+                        ),
+                        None,
+                    )
+                options: list[dict[str, str]] = []
+                if team and team.get("path"):
+                    try:
+                        spec = load_team_spec(Path(str(team["path"])))
+                    except Exception:
+                        spec = None
+                    if spec is not None:
+                        seen: set[tuple[str, str]] = set()
+                        for pool in spec.agent_pools:
+                            if pool.backend not in {"codex", "codebuddy"}:
+                                continue
+                            if not pool.model:
+                                continue
+                            key = (pool.backend, pool.model)
+                            if key not in seen:
+                                seen.add(key)
+                                options.append(
+                                    {
+                                        "backend": pool.backend,
+                                        "model": pool.model,
+                                        "provider_id": pool.provider_id,
+                                    }
+                                )
+                payload = options
             elif resource == "events":
                 payload = _rows(
                     store.connection.execute(
@@ -275,6 +444,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         "SELECT * FROM agent_instances ORDER BY pool_id, agent_id"
                     ).fetchall()
                 )
+            elif resource == "chat":
+                payload = self._chat_payload(run_id)
             elif resource == "worktree":
                 cached = self.server._run_worktrees.get(run_id)
                 if cached is not None:
@@ -296,16 +467,169 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             return
         self._send_json({"run_id": run_id, resource: payload})
 
-    # -- 协调写操作（临时 acquire，serve 持权期间 busy） ---------------------
+    def _chat_payload(self, run_id: str) -> dict[str, Any]:
+        """Build a read-only conversation view from persisted task/call data."""
+        store = self.server.store
+        task_rows = store.connection.execute(
+            """
+            SELECT t.task_id, t.state, t.access_mode, t.created_at,
+                   d.required_role_id, d.instruction_text, d.cwd
+            FROM tasks t
+            JOIN task_dispatch_specs d ON d.task_id = t.task_id
+            WHERE t.run_id = ?
+            ORDER BY t.created_at, t.task_id
+            """,
+            (run_id,),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        agents: dict[str, dict[str, Any]] = {}
+
+        def decode(raw: str | None) -> dict[str, Any]:
+            if not raw:
+                return {}
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError):
+                return {"text": str(raw)}
+            return value if isinstance(value, dict) else {"text": str(value)}
+
+        for task in task_rows:
+            task_id = str(task["task_id"])
+            messages: list[dict[str, Any]] = [{
+                "id": f"task:{task_id}",
+                "role": "user",
+                "kind": "task",
+                "agent_id": None,
+                "backend": None,
+                "state": "submitted",
+                "text": str(task["instruction_text"] or ""),
+                "created_at": str(task["created_at"] or ""),
+            }]
+            protocol_rows = store.connection.execute(
+                "SELECT message_id, envelope_json, created_at FROM messages "
+                "WHERE run_id=? AND task_id=? ORDER BY created_at, message_id",
+                (run_id, task_id),
+            ).fetchall()
+            for row in protocol_rows:
+                envelope = decode(row["envelope_json"])
+                messages.append({
+                    "id": str(row["message_id"]),
+                    "role": "system",
+                    "kind": str(envelope.get("kind") or "message"),
+                    "agent_id": envelope.get("sender_agent_id"),
+                    "backend": None,
+                    "state": "persisted",
+                    "text": str(envelope.get("payload") or envelope.get("body") or envelope),
+                    "created_at": str(row["created_at"] or ""),
+                })
+            calls = store.connection.execute(
+                """
+                SELECT c.call_id, c.state, c.backend, c.requested_at,
+                       c.started_at, c.finished_at, c.result_json, c.failure_json,
+                       c.agent_id, a.model, a.provider_id
+                FROM backend_calls c
+                LEFT JOIN agent_instances a ON a.agent_id = c.agent_id
+                WHERE c.run_id=? AND c.task_id=?
+                ORDER BY c.requested_at, c.call_id
+                """,
+                (run_id, task_id),
+            ).fetchall()
+            for call in calls:
+                result_json = decode(call["result_json"])
+                failure_json = decode(call["failure_json"])
+                text = result_json.get("text")
+                if text is None and result_json.get("structured"):
+                    text = json.dumps(
+                        result_json["structured"], ensure_ascii=False, indent=2
+                    )
+                if text is None and failure_json:
+                    text = failure_json.get("message") or json.dumps(
+                        failure_json, ensure_ascii=False
+                    )
+                if text is None:
+                    text = "（Agent 尚未返回内容）"
+                agent_id = str(call["agent_id"] or "")
+                if agent_id:
+                    agents[agent_id] = {
+                        "agent_id": agent_id,
+                        "backend": call["backend"],
+                        "model": call["model"],
+                        "provider_id": call["provider_id"],
+                    }
+                messages.append({
+                    "id": str(call["call_id"]),
+                    "role": "agent",
+                    "kind": "backend_call",
+                    "agent_id": agent_id,
+                    "backend": call["backend"],
+                    "model": call["model"],
+                    "provider_id": call["provider_id"],
+                    "state": call["state"],
+                    "text": str(text),
+                    "structured": result_json.get("structured") or {},
+                    "created_at": str(
+                        call["finished_at"] or call["started_at"] or call["requested_at"]
+                    ),
+                })
+            result.append({
+                "task_id": task_id,
+                "state": task["state"],
+                "access_mode": task["access_mode"],
+                "role_id": task["required_role_id"],
+                "prompt": task["instruction_text"],
+                "messages": messages,
+            })
+        return {"tasks": result, "agents": list(agents.values())}
+
+    # -- 协调写操作 ---------------------------------------------------------
 
     def _with_control(
-        self, run_id: str, fn: Callable[[Any, Any], None]
+        self,
+        run_id: str,
+        fn: Callable[[Any, Any], None],
+        *,
+        allow_active_serve: bool = False,
     ) -> bool:
-        """临时 acquire controller+authority 执行 fn；失败返回 False 并回 409。"""
+        """执行协调写操作；审核/删除可复用 serve 当前 fencing token。"""
         store = self.server.store
         controller = store.acquire_run_controller(
             run_id, "console-op", lease_seconds=60
         )
+        owns_controller = controller is not None
+        if controller is None and allow_active_serve:
+            active = store.active_run_controller(run_id)
+            authority_row = store.active_authority(run_id)
+            if (
+                active is not None
+                and str(active["owner_id"]).startswith("serve-")
+                and authority_row is not None
+                and str(authority_row["owner_agent_id"]) == str(active["owner_id"])
+            ):
+                controller = ControllerToken(
+                    run_id=run_id,
+                    owner_id=str(active["owner_id"]),
+                    epoch=int(active["epoch"]),
+                    expires_at=str(active["expires_at"]),
+                )
+                authority = AuthorityToken(
+                    run_id=run_id,
+                    owner_agent_id=str(authority_row["owner_agent_id"]),
+                    role_id=str(authority_row["role_id"]),
+                    epoch=int(authority_row["epoch"]),
+                    expires_at=str(authority_row["expires_at"]),
+                )
+                try:
+                    fn(controller, authority)
+                    return True
+                except (FencedControllerError, FencedAuthorityError) as exc:
+                    self._send_error_json(409, str(exc))
+                    return False
+                except ValueError as exc:
+                    self._send_error_json(400, str(exc))
+                    return False
+                except KeyError as exc:
+                    self._send_error_json(404, str(exc))
+                    return False
         if controller is None:
             self._send_error_json(
                 409, "run controller is held by another owner (serve running?)"
@@ -336,7 +660,8 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 self._send_error_json(404, str(exc))
                 return False
         finally:
-            store.release_run_controller(controller)
+            if owns_controller and controller is not None:
+                store.release_run_controller(controller)
 
     def _post_run_action(self, path: str, body: dict[str, Any]) -> None:
         parts = path.strip("/").split("/")
@@ -354,6 +679,20 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     task_id, c, reason=str(body.get("reason") or "console-cancel")
                 ),
             ) and self._send_json({"ok": True, "task_id": task_id})
+            return
+        if action == "tasks" and len(parts) >= 6 and parts[5] == "delete":
+            task_id = parts[4]
+            self._with_control(
+                run_id,
+                lambda c, a: store.delete_task(
+                    run_id,
+                    task_id,
+                    c,
+                    a,
+                    reason=str(body.get("reason") or "console-delete"),
+                ),
+                allow_active_serve=True,
+            ) and self._send_json({"ok": True, "task_id": task_id, "deleted": True})
             return
         if action == "tasks" and len(parts) >= 6 and parts[5] == "review":
             task_id = parts[4]
@@ -390,19 +729,49 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         if TaskState is None:  # pragma: no cover
             self._send_error_json(500, "TaskState unavailable")
             return
+        mode = str(body.get("mode") or "worker")
+        if mode not in {"worker", "supervisor"}:
+            self._send_error_json(400, "mode must be worker or supervisor")
+            return
         task_id = str(body.get("task_id") or f"task-{uuid.uuid4().hex[:12]}")
-        access_mode = str(body.get("access_mode") or "read_only")
-        write_scope = tuple(body.get("write_scope") or ())
+        access_mode = (
+            "read_only" if mode == "supervisor"
+            else str(body.get("access_mode") or "read_only")
+        )
+        write_scope = () if mode == "supervisor" else tuple(body.get("write_scope") or ())
         prompt = str(body.get("prompt") or task_id)
         cwd = str(body.get("cwd") or self.server.worktree or ".")
         timeout = float(body.get("timeout_seconds") or 60)
+        required_role_id = (
+            "supervisor" if mode == "supervisor"
+            else str(body.get("required_role_id") or "worker")
+        )
+        required_backend_raw = body.get("required_backend")
+        required_backend_text = "" if required_backend_raw is None else str(required_backend_raw)
+        required_backend = required_backend_text.strip() or None
+        required_model_raw = body.get("required_model")
+        required_model_text = "" if required_model_raw is None else str(required_model_raw)
+        required_model = required_model_text.strip() or None
+        required_provider_raw = body.get("required_provider_id")
+        required_provider_text = (
+            "" if required_provider_raw is None else str(required_provider_raw)
+        )
+        required_provider_id = required_provider_text.strip() or None
+        if mode == "worker" and required_role_id == "supervisor":
+            self._send_error_json(
+                400, "supervisor tasks must use mode=supervisor"
+            )
+            return
         try:
             self.server.store.create_task(
                 run_id,
                 task_id,
                 access_mode=access_mode,
                 write_scope=write_scope,
-                required_role_id=str(body.get("required_role_id") or "worker"),
+                required_role_id=required_role_id,
+                required_backend=required_backend,
+                required_model=required_model,
+                required_provider_id=required_provider_id,
                 prompt=prompt,
                 cwd=cwd,
                 timeout_seconds=timeout,
@@ -411,7 +780,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001
             self._send_error_json(400, f"{type(exc).__name__}: {exc}")
             return
-        self._send_json({"ok": True, "task_id": task_id})
+        self._send_json({"ok": True, "task_id": task_id, "mode": mode})
 
     # -- 写任务闭环 ---------------------------------------------------------
 
@@ -495,25 +864,112 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if result.get("status") == "busy":
                 raise ValueError("merge queue busy; retry")
 
-        if self._with_control(run_id, run):
+        if self._with_control(run_id, run, allow_active_serve=True):
             self._send_json({"ok": True, "decision": decision})
 
     def _serve_action(self, run_id: str, action: str, body: dict[str, Any]) -> None:
         manager = self.server.serve_manager
         if action == "start":
-            team_path = Path(str(body.get("team_path") or ""))
+            self.server._serve_stopped.discard(run_id)
+            requested_path = str(body.get("team_path") or "").strip()
+            team_id = str(body.get("team_id") or "").strip()
+            run_team_id = ""
+            run_row = self.server.store.connection.execute(
+                "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run_row is None:
+                self._send_error_json(404, f"run not found: {run_id}")
+                return
+            run_team_id = str(run_row["team_id"] or "").strip()
+            team_id = team_id or run_team_id
+            if not requested_path:
+                from orchestrator.console.settings import list_saved_teams
+
+                teams = list_saved_teams(self.server.project_root)
+                selected = next(
+                    (
+                        item
+                        for item in teams
+                        if str(item.get("team_id") or "") == team_id
+                    ),
+                    None,
+                )
+                # Keep compatibility with Runs created before the default
+                # team started exposing its real team_id.
+                if selected is None and team_id == "default":
+                    selected = next(
+                        (
+                            item
+                            for item in teams
+                            if str(item.get("source") or "") != "saved"
+                        ),
+                        None,
+                    )
+                if selected is None or not selected.get("path"):
+                    self._send_error_json(
+                        400,
+                        f"team {team_id or '<empty>'} is not saved; select a saved team before starting serve",
+                    )
+                    return
+                requested_path = str(selected["path"])
+                team_id = str(selected.get("team_id") or team_id)
+                if run_team_id != team_id:
+                    if run_team_id == "default":
+                        # Runs created before the default team exposed its
+                        # real ID need a one-time migration; otherwise the
+                        # serve process would register agents under a team
+                        # that the Run does not reference.
+                        with self.server.store.connection:
+                            self.server.store.connection.execute(
+                                "UPDATE runs SET team_id=? WHERE run_id=?",
+                                (team_id, run_id),
+                            )
+                    else:
+                        self._send_error_json(
+                            400,
+                            f"run team {run_team_id} does not match saved team {team_id}",
+                        )
+                        return
+            team_path = Path(requested_path)
             if not team_path.is_absolute():
                 team_path = self.server.project_root / team_path
             if not team_path.is_file():
                 self._send_error_json(400, f"team file not found: {team_path}")
                 return
+            from orchestrator.core.config import load_team_spec
+
+            try:
+                actual_team_id = load_team_spec(team_path).team_id
+            except Exception as exc:  # noqa: BLE001 - return a safe config error
+                self._send_error_json(
+                    400, f"invalid team file {team_path}: {type(exc).__name__}"
+                )
+                return
+            if run_team_id and actual_team_id != run_team_id:
+                if run_team_id == "default":
+                    with self.server.store.connection:
+                        self.server.store.connection.execute(
+                            "UPDATE runs SET team_id=? WHERE run_id=?",
+                            (actual_team_id, run_id),
+                        )
+                else:
+                    self._send_error_json(
+                        400,
+                        f"run team {run_team_id} does not match team file {actual_team_id}",
+                    )
+                    return
+            team_id = actual_team_id
             result = manager.start(
                 run_id, team_path, db_path=self.server.db_path
             )
+            result = dict(result)
+            result.update({"team_id": team_id, "team_path": str(team_path)})
             self._send_json(result)
             return
         if action == "stop":
-            self._send_json(manager.stop(run_id))
+            result = manager.stop(run_id)
+            self.server._serve_stopped.add(run_id)
+            self._send_json(result)
             return
         if action == "status":
             self._send_json(manager.status(run_id))
@@ -564,6 +1020,7 @@ class ConsoleHTTPServer(HTTPServer):
         self.serve_manager = ServeProcessManager(project_root)
         self._git_manager: Any | None = None
         self._run_worktrees: dict[str, dict[str, Any]] = {}
+        self._serve_stopped: set[str] = set()
         super().__init__((host, port), ConsoleHandler)
 
     def close(self) -> None:

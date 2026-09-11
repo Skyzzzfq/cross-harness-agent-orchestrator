@@ -35,17 +35,24 @@ rem ------- help ---------------------------------------------------
 if /i "%MODE%"=="help" goto :help
 
 rem ------- locate a python interpreter ----------------------------
+rem Reuse the project venv when it already exists. This is important on
+rem machines where Python is intentionally not on PATH (the venv is enough).
+set "VPY=.venv\Scripts\python.exe"
+if exist "%VPY%" (
+    set "PY=%VPY%"
+    goto :python_ready
+)
 set "PY=py -3"
 where py >nul 2>nul
 if errorlevel 1 set "PY=python"
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [error] python not found. Install Python 3.10+ and re-run.
+    echo [error] python not found and project venv is missing. Install Python 3.10+ and re-run.
     goto :fail
 )
 
 rem ------- ensure venv + install (first run only) ------------------
-if not exist ".venv\Scripts\python.exe" (
+if not exist "%VPY%" (
     echo [orchestrator] first run: bootstrapping venv and dependencies...
     echo [orchestrator] this may take several minutes.
     %PY% scripts\bootstrap.py --root .
@@ -56,7 +63,7 @@ if not exist ".venv\Scripts\python.exe" (
     echo [orchestrator] environment ready.
 )
 
-set "VPY=.venv\Scripts\python.exe"
+:python_ready
 if not exist "%VPY%" (
     echo [error] venv python missing: %VPY%
     goto :fail

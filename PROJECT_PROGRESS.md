@@ -1,9 +1,19 @@
 # 项目开发进度与阶段台账
 
-更新时间：2026-09-10
+个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”已完成，证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；R1–R8 尚未开始。后续仍按“角色/计划 → 隔离工作区 → 移交 → 独立验证 → 消息预算 → 对话工作台 → 恢复 → 真实验收”推进。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
+
+登录状态补充核验：同一项目 venv/SDK 在沙箱内无法读取 CodeBuddy 用户级认证目录，正常 Windows 用户权限下 marker=True、SDK=True。此前控制台继承沙箱限制会把“无权读取”误判成“未登录”；现已改为返回 `login_probe=unreadable` 和明确提示。已通过批准在正常权限启动 8091 控制台，真实 `/api/connections` 返回 CodeBuddy `logged_in=true`。另外，模型健康检查与真实任务都会直接发 CodeBuddy 请求：`.agent-hub/model-health.json` 最近一次记录 7 个内置模型成功，`test003` 已返回 CodeBuddy 文本并完成。因此“模型请求成功”是比认证文件探测更强的可用性证据。
+
+最新测试结果：311 项，310 通过、1 跳过（团队绑定与编辑器状态保留修复后）；以下旧切片测试数字为历史记录。
+
+最新授权修复：CodeBuddy 网页入口改为内存中的 starting / waiting / completed / failed 状态；授权链接交给前端打开并提供可点击回退入口，终态清除链接，不写入日志。8090 实测接口进入 waiting；人工登录回调尚待验收。此前仅凭进程存活宣称授权页已打开的结论不成立。
+
+更新时间：2026-09-11
 GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 审计基线远端 main：87b875e；整改后当前远端 main 以 `git log` 为准
-当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；产品已达可自用状态，网页控制台写任务闭环 UI 已补齐。**
+当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；主管入口与模型选择之后，当前为 `stage3: checkpoint console review-chat slice`。**
+
+对话工作台下一切片设计见 `docs/CHAT_WORKSPACE_PLAN.md`：项目→角色→Agent 树、独立上下文、用户引导队列及 Codex/CodeBuddy 活动会话语义。当前先保留既有只读 Agent 对话页，不把尚未实现的即时引导伪装成已支持能力。
 
 本文是当前状态的唯一入口。详细验收标准以《跨Harness多Agent团队编排系统实施计划.md》为准；阶段 2 的审计与对账记录见 STAGE2_AUDIT_FINDINGS.md、STAGE2_AUDIT_RESPONSE.md。
 
@@ -14,17 +24,36 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | 阶段 0：可行性闸门 | GO | SPIKE_REPORT.md、ACCOUNT_BOUNDARIES.md | 是 |
 | 阶段 1：PoC | PASS | STAGE1_REPORT.md、真实三连跑历史 | 是 |
 | 阶段 2：MVP | **PASS（重新签字）** | 194 项测试（签字时）、schema v12（当时）、P0/P1 全关、完整流水线证据 | **是** |
-| 阶段 3：Beta | **PASS（stage3: complete Beta）** | **261 项测试**、schema v13、E1–E7 PASS + E8 SKIP（用户决策）、E3/E5 真实证据 | **是** |
+| 阶段 3：Beta | **PASS（历史签字）/主管入口 checkpoint** | **301 项测试通过**、schema v15、E1–E7 PASS + E8 SKIP（用户决策）；主管入口切片报告见 `STAGE3_SUPERVISOR_ENTRY_REPORT.md` | 主管入口尚未完成 |
+
+### 个人开发版整改台账（R0–R8）
+
+| 切片 | 状态 | 证据 | 下一步 |
+|---|---|---|---|
+| R0 基线与能力 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；备份恢复通过；311/310/1 基线；Run 6 样本 | 进入 R1 |
+| R1 角色与计划 | 待开始 | — | 依赖 R0；先实现角色模板、计划 revision 与批准 |
+| R2–R8 | 待开始 | — | 依赖前一切片，禁止跳级 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现，WorkBuddy 确认 3 项 P0、6 项 P1 和 4 项文档问题成立后原签字撤销。随后按审计顺序完成全部 **P0（P0-01/02/03）与 MVP 必需 P1（P1-01/04/05）** 的修复并重新验收；【Beta 再补】项（P1-02/03/06）按产品口径转入阶段 3 处理，不阻塞本阶段签字。
 
 ## 2. 已验证基线
 
-- 全量测试：**261/261 通过**（阶段 3 Beta 收尾后新增控制台/端口/登录等测试）。
-- 当前实际数据库：schema v13，integrity_check=ok，foreign_key_check=0。
+- 全量测试：**311 项，310 通过、1 跳过**（模型/提供方/自动模型连通性筛选、ArkCLI 用户级模型读取、后台浏览器登录授权、审核租约复用、任务删除、Agent 对话、Codex 超时回归和 Run 团队绑定切片后重新执行；1 项按既有环境条件跳过）。
+- 当前数据库实现版本：schema v15，integrity_check 与 foreign_key_check 的既有回归保持通过；v14→v15 为 Agent/Task 的提供方路由迁移。
 - 阶段 0、阶段 1 的历史签字仍有效。
 - 真实 Adapter 已证明 10 个只读场景到达 REVIEW（adapter terminal），2 CodeBuddy + 1 Codex 存在真实并行重叠；完整流水线（REVIEW→三层审核→真实 Git 集成→COMPLETED）已由 Fake 端到端测试覆盖。
 - P0-01 authority fencing、P0-02 merge/git/outbox 原子闭环、P0-03 workspace 边界、P1-01 终态口径、P1-04 写任务闭环、P1-05 超时/脱敏均已实现并有回归测试。
+- 主管入口当前已完成 Slice A–C：严格计划契约校验、原子 Task DAG 物化/幂等、serve 调度接入和网页 `mode=supervisor` 创建入口；尚未声称真实 Codex 主管、计划前人工批准和端到端自动集成验收完成。
+- 模型选择切片已接通：控制台任务与团队池均使用模型下拉框；Codex 通过当前登录态调用只读模型目录，WorkBuddy/CodeBuddy 读取本地产品模型清单及 ArkCLI 用户级模型配置。
+- CodeBuddy 模型选择已按来源分组：提供方下拉框将“内置模型（CodeBuddy 默认）”与“自定义模型提供方”隔开，模型下拉框显示“内置模型”或“自定义模型 · 具体提供方”，火山 CodingPlan 不再与内置模型混淆。
+- 团队编辑器会在新增/删除 Agent 池前同步当前表单，保留已填写的角色、池标识、数量、提供方和模型；CodeBuddy 连通性结果按提供方缓存，编辑器重绘不会重复触发查询。
+- Run 启动服务时按 Run 保存的 team_id 自动解析 .agent-hub/teams/<team_id>.json 或默认团队文件，不再弹出并默认使用 config/team.yaml；旧的 default Run 仍兼容回退到默认团队。
+- 控制台审核/对话切片已接通：serve 持有 `serve-*` controller 时，人工审核和删除复用当前 controller/authority fencing token，不再因“run controller is held by another owner”失败；暂停/恢复/取消仍保持单写者保护。
+- 任务列表补充任务说明、尝试次数、独立“对话/删除”按钮；删除只允许非运行任务，删除前清理 FK 子记录并保留 `task.deleted` 审计事件。
+- 新增 `GET /api/runs/{run_id}/chat` 与“Agent 对话”页，按 Run→任务隔离显示任务提示、协议消息和每个 Agent backend call 的状态/输出，运行中按 2.5 秒轮询刷新。
+- 提供方配置已接通：WorkBuddy/CodeBuddy 内置模型与火山 CodingPlan 可并存；自定义提供方只保存 `provider_id`、Base URL、模型 ID 和 API key 环境变量名，真实密钥只在启动子进程时从环境读取，不写入控制台或 `.agent-hub/settings.json`。
+- 调度器使用 `required_backend + required_model + required_provider_id` 严格匹配；缺少对应模型、提供方或环境密钥时保守阻断，不静默切换到其他模型/提供方。
+- WorkBuddy/CodeBuddy 目录在选择后端或提供方后自动测试：对当前内置/自定义模型做一次无工具最小请求，保存成功模型清单到 `.agent-hub/model-health.json`，后续下拉框只显示上次探测仍匹配的可用模型；模型清单变化后自动解除旧筛选并在下一次选择时重新测试。CodeBuddy 一键授权现在由后台 SDK 认证流程自动打开浏览器并等待回调，不再要求用户打开终端或输入 `/login`；授权仍保存在同一 Windows 用户级目录，跨项目共享。
 
 ## 3. 阶段 2 已存在的组件
 
@@ -119,7 +148,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | T3 | **本地状态页 + 管理控制台** | ✅ 已完成（`orchestrator/console/server.py`，CLI `console` 子命令）：本地 HTTP 服务（http.server + 无构建静态页，localhost 默认 8080）。只读 API：status/runs-tasks/events/merges/approvals/outbox/agents（时间线/任务/审批/成本）。管理控制台写操作：发起任务、取消、暂停/恢复——全部复用 store 的 controller/authority fencing；启动时 acquire 协调权成功→读写模式，serve 持有期间→自动只读（写操作 409）。`SQLiteStateStore` 连接允许跨线程（check_same_thread=False）。 |
 | T4 | **Adapter 能力协商与回归** | ✅ 已完成：`BackendCapabilities` 契约（backend/version/supports_write/supports_cancel/supports_structured_output）；Codex（write+cancel）与 CodeBuddy（write，无硬中断 cancel=false）adapter 版本探测（importlib.metadata）；scheduler 派发前能力协商——写任务遇不支持写的后端 → BLOCKED `capability_unsupported`，绝不派发；功能开关 `orchestrator/core/features.py`（`AGENT_HUB_FEATURES` 环境变量，允许列表/减号禁用）。 |
 | T5 | **Windows 支持矩阵** | ✅ 已完成：中文/空格仓库与文件路径下真实 Git 集成 round-trip；300+ 字符长路径；CRLF 内容 round-trip；文件锁测试暴露并修复 `commit_file` 部分写入问题（改用 `safe_write_text` 原子写入，失败不截断原文件）；取消后无遗留 backend call。 |
-| T6 | **数据库升级/降级/备份/恢复演练** | ✅ 已完成（`orchestrator/db_ops.py` + CLI `db-backup/db-restore/db-verify`）：SQLite 在线备份 API（一致性，不依赖文件拷贝）；备份→修改→恢复→数据回到备份点；verify（integrity_check + foreign_key_check + schema_version 13）；降级演练 = restore 旧备份；schema 升级（v2→v13）迁移后校验通过。 |
+| T6 | **数据库升级/降级/备份/恢复演练** | ✅ 已完成（`orchestrator/db_ops.py` + CLI `db-backup/db-restore/db-verify`）：SQLite 在线备份 API（一致性，不依赖文件拷贝）；备份→修改→恢复→数据回到备份点；verify（integrity_check + foreign_key_check + 当前 schema 版本）；降级演练 = restore 旧备份；历史 v2→v13 与新增 v13→v14 迁移均有校验。 |
 | T7 | **干净 Windows bootstrap** | ✅ 已完成（`orchestrator/bootstrapper.py` + `scripts/bootstrap.py` + `docs/INSTALL.md`）：前置检查（Python>=3.10/Git 必需 + Codex/CodeBuddy CLI 可选探测）、创建 venv + `pip install -e .`、初始化 `.agent-hub/{state,reports,backups,certs,logs}`；INSTALL.md 给出 30 分钟安装演示全流程（检查→bootstrap→init→serve→console→db 演练）。注意：**不要覆盖 `orchestrator/bootstrap.py`**（那是 CLI `init` 的核心 `initialize_hub`）。 |
 | T8 | **可选 8 Agent + MCP/native timebox** | ✅ 已完成：8 Agent 并发验证（并发峰值 BUSY=8 达池上限；8 路写任务并行→真实集成→全部 COMPLETED，0 重复 merge）；`docs/T8_MCP_EVALUATION.md` 给出 MCP Facade / CodeBuddy native team 的 timebox 结论（均非阻断、延后，当前架构不依赖）。默认并发 2–4，8 Agent 为可选上限。 |
 | EXT | **本地网页产品控制台（用户需求）** | ✅ 已完成：`orchestrator/console/` 升级为多 Run 产品控制台（settings/serve_manager/server 三模块）。**Connections**（探测 codex/codebuddy 登录态 + 一键登录引导，不存储凭证）；**Teams**（鼠标组建临时 team：backend/role/count 多池编辑 + 预览 JSON，保存到 `.agent-hub/teams/` 或覆盖默认 `config/team.yaml`）；**Runs**（全部 Run 列表/新建，按 team 一键启动/停止 serve 子进程，日志 `.agent-hub/logs/serve-<run>.log`）；保留单 Run 详情（任务/审批/merge 时间线）。协调写（取消/暂停/恢复）操作时临时 acquire controller，serve 持权期间 409。新增 CLI `serve-team --run --team`（按 team 多后端 pools 启动常驻）。**写任务闭环 UI 已补齐**：发起任务表单可填 access_mode / write_scope / cwd / timeout；写任务自动准备受管 worktree（`POST /api/runs/{run_id}/worktree`，幂等）；REVIEW 任务提供「通过 / 打回」按钮（通过 = 记录 human APPROVED + 产出 commit + enqueue_merge + MergeExecutor 真实集成 → COMPLETED；打回 = 记录 human REWORK + reassign 重新派发）。 |
@@ -177,3 +206,4 @@ SPIKE_REPORT.md 和 STAGE1_REPORT.md 为只读历史签字。旧的 Stage 2 comp
 - 8f4ecc9：阶段 3 E3 drain 孤儿检查 + E5 Prompt 注入语料（codex 4/4）。
 - 签字提交 `stage3: complete Beta`（2026-09-06，tag `stage3-beta-complete`）：README 自用说明 + 本台账落档。阶段 0/1/2/3 全部 PASS，可自用。
 - （2026-09-10）控制台写任务闭环 UI 提交：write_scope 表单、worktree 自动准备、REVIEW 通过/打回按钮 + 进度台账数据校准（261 测试、schema v13）。
+- （2026-09-11）修复 CodeBuddy 一键登录运行时：启动器优先复用项目 `.venv`，后台授权即使控制台由备用 Python 启动也切换到项目 `.venv`；新增回归测试验证 SDK 运行时选择和子进程秒退提示；控制台不再要求输入 `/login`；补齐 serve 子进程源码路径传递；全量 301/301 通过。

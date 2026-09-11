@@ -206,6 +206,13 @@ class ProbeTests(unittest.TestCase):
     def test_cli_routes_authentication(self, login: object) -> None:
         self.assertEqual(main(["auth", "codex"]), 0)
 
+    @patch("orchestrator.cli.login", return_value=0)
+    def test_cli_routes_background_browser_authentication(self, login: object) -> None:
+        self.assertEqual(main(["auth", "codebuddy", "--open-browser"]), 0)
+        login.assert_called_once_with(
+            "codebuddy", Path.cwd(), open_browser=True
+        )
+
     @patch(
         "orchestrator.cli.run_codebuddy_session_spike",
         return_value={"backend": "codebuddy", "status": "ready"},

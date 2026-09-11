@@ -60,6 +60,8 @@ class SessionRef:
     session_id: str
     backend: str
     provider_session_id: str | None = None
+    model: str | None = None
+    provider_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id.strip() or not self.backend.strip():

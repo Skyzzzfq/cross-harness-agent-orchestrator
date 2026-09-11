@@ -22,6 +22,7 @@ class AgentPoolSpec:
     count: int
     max_count: int
     model: str | None = None
+    provider_id: str | None = None
     execution_mode: str = "sdk_session"
 
 
@@ -61,6 +62,9 @@ def load_team_spec(path: Path) -> TeamSpec:
             count=int(item["count"]),
             max_count=int(item["max_count"]),
             model=None if item.get("model") is None else str(item["model"]),
+            provider_id=(
+                None if item.get("provider_id") is None else str(item["provider_id"])
+            ),
             execution_mode=str(item.get("execution_mode", "sdk_session")),
         )
         for item in data["agent_pools"]

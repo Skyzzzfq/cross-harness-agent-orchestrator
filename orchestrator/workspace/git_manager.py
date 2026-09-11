@@ -90,6 +90,8 @@ def _git(
         cwd=cwd,
         env=_git_environment(),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )

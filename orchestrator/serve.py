@@ -136,6 +136,18 @@ async def serve(
                     controller=token,
                     controller_lease_seconds=controller_lease_seconds,
                 )
+                if team_spec is not None:
+                    from orchestrator.core.supervisor_planning import (
+                        materialize_ready_supervisor_plans,
+                    )
+
+                    materialize_ready_supervisor_plans(
+                        store,
+                        run_id=run_id,
+                        team_spec=team_spec,
+                        controller=token,
+                        authority=authority_token,
+                    )
                 # P0-02：常驻循环消费 Merge Queue 与 Transactional Outbox
                 if merge_executor is not None:
                     merge_executor.run_merge_once(

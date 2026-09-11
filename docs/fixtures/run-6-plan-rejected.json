@@ -1,0 +1,23 @@
+{
+  "run_id": "6",
+  "task_id": "task-58ec49aa39d6",
+  "attempt_id": "attempt-77442fbd043f454e",
+  "backend_call": {
+    "backend": "codex",
+    "state": "succeeded",
+    "backend_invoked": true,
+    "result_json": {
+      "structured": {},
+      "text": "worker 1: 1\nworker 2: 2"
+    },
+    "usage": {
+      "duration_ms": 33782
+    }
+  },
+  "rejection_event": {
+    "kind": "plan.rejected",
+    "from_state": "REVIEW",
+    "to_state": "REVIEW",
+    "reason": "PlanValidationError: supervisor text is not valid JSON"
+  }
+}

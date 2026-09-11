@@ -77,6 +77,7 @@ def _reconcile_locked(
             pool_id=spec.pool_id,
             backend=spec.backend,
             model=spec.model,
+            provider_id=spec.provider_id,
             role_id=spec.role_id,
         )
         created.append(provisioned["agent_id"])

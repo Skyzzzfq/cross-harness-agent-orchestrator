@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -63,10 +64,22 @@ class ServeProcessManager:
         if db_path is not None:
             command.extend(["--db", str(db_path)])
         log = self._log_path(run_id)
+        # The console may manage a project directory that does not itself
+        # contain an installed copy of this package (for example a temporary
+        # project in tests).  Preserve the current source root in the child
+        # interpreter's import path without changing the user's project.
+        env = os.environ.copy()
+        source_root = Path(__file__).resolve().parents[2]
+        pythonpath = [str(source_root)]
+        existing_pythonpath = env.get("PYTHONPATH")
+        if existing_pythonpath:
+            pythonpath.append(existing_pythonpath)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath)
         with open(log, "a", encoding="utf-8") as handle:
             proc = subprocess.Popen(
                 command,
                 cwd=str(self.project_root),
+                env=env,
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,

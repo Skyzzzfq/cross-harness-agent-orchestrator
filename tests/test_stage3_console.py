@@ -125,6 +125,46 @@ class ConsoleServerTests(unittest.TestCase):
         status, payload = _request(self.port, "/api/runs/run-1/tasks")
         self.assertEqual(payload["tasks"][0]["task_id"], "task-1")
 
+    def test_chat_endpoint_scopes_task_context(self) -> None:
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks",
+            method="POST",
+            body={
+                "task_id": "task-chat",
+                "prompt": "Summarize this task",
+                "cwd": str(self.project),
+            },
+        )
+        self.assertEqual(status, 200, payload)
+        status, payload = _request(self.port, "/api/runs/run-1/chat")
+        self.assertEqual(status, 200, payload)
+        task = next(item for item in payload["chat"]["tasks"] if item["task_id"] == "task-chat")
+        self.assertEqual(task["messages"][0]["role"], "user")
+        self.assertEqual(task["messages"][0]["text"], "Summarize this task")
+
+    def test_console_can_delete_task_and_keep_audit_event(self) -> None:
+        self.store.create_task("run-1", "task-delete", cwd=str(self.project))
+        self.store.transition_task("task-delete", TaskState.READY, reason="test")
+        self.store.create_attempt("task-delete", "attempt-delete", "agent-delete")
+        self.store.transition_task("task-delete", TaskState.REVIEW, reason="test")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-delete/delete",
+            method="POST",
+            body={"reason": "test-delete"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertIsNone(
+            self.store.connection.execute(
+                "SELECT 1 FROM tasks WHERE task_id='task-delete'"
+            ).fetchone()
+        )
+        event = self.store.connection.execute(
+            "SELECT kind FROM events WHERE task_id='task-delete' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["kind"], "task.deleted")
+
     def test_create_task_and_cancel_via_console(self) -> None:
         status, payload = _request(
             self.port,
@@ -141,6 +181,263 @@ class ConsoleServerTests(unittest.TestCase):
             body={"reason": "console-cancel"},
         )
         self.assertEqual(status, 200, payload)
+
+    def test_console_can_select_backend_and_model_for_task(self) -> None:
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks",
+            method="POST",
+            body={
+                "task_id": "task-model",
+                "prompt": "use selected model",
+                "cwd": str(self.project),
+                "required_backend": "codex",
+                "required_model": "gpt-test",
+            },
+        )
+        self.assertEqual(status, 200, payload)
+        row = self.store.connection.execute(
+            "SELECT required_backend, required_model FROM task_dispatch_specs "
+            "WHERE task_id='task-model'"
+        ).fetchone()
+        self.assertEqual(row["required_backend"], "codex")
+        self.assertEqual(row["required_model"], "gpt-test")
+        status, payload = _request(self.port, "/api/runs/run-1/tasks")
+        self.assertEqual(status, 200)
+        task = next(item for item in payload["tasks"] if item["task_id"] == "task-model")
+        self.assertEqual(task["required_model"], "gpt-test")
+
+    def test_console_lists_models_configured_by_run_team(self) -> None:
+        team_path = self.project / "config" / "team.yaml"
+        team = json.loads(team_path.read_text(encoding="utf-8"))
+        team["agent_pools"] = [
+            {
+                "pool_id": "codex-pool",
+                "backend": "codex",
+                "role_id": "worker",
+                "count": 1,
+                "max_count": 1,
+                "model": "gpt-test",
+            },
+            {
+                "pool_id": "codebuddy-pool",
+                "backend": "codebuddy",
+                "role_id": "worker",
+                "count": 1,
+                "max_count": 1,
+                "model": "glm-test",
+            },
+        ]
+        team_path.write_text(json.dumps(team), encoding="utf-8")
+        status, payload = _request(self.port, "/api/runs/run-1/models")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            {(item["backend"], item["model"]) for item in payload["models"]},
+            {("codex", "gpt-test"), ("codebuddy", "glm-test")},
+        )
+
+    def test_console_model_catalog_uses_read_only_discovery_result(self) -> None:
+        with mock.patch(
+            "orchestrator.console.model_catalog.discover_codex_models",
+            return_value={
+                "backend": "codex",
+                "status": "ok",
+                "source": "codex",
+                "models": [{"id": "gpt-live", "label": "GPT Live"}],
+            },
+        ):
+            status, payload = _request(
+                self.port, "/api/model-catalog?backend=codex"
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["source"], "codex")
+        self.assertEqual(payload["models"][0]["id"], "gpt-live")
+
+    def test_console_probe_keeps_only_reachable_codebuddy_models(self) -> None:
+        catalog = {
+            "status": "ok",
+            "source": "product.internal.json",
+            "models": [
+                {"id": "works", "label": "Works"},
+                {"id": "blocked", "label": "Blocked"},
+            ],
+        }
+        probe_results = [
+            {"id": "works", "provider_id": None, "ok": True},
+            {
+                "id": "blocked",
+                "provider_id": None,
+                "ok": False,
+                "error_kind": "ExecutionError",
+            },
+        ]
+        with mock.patch(
+            "orchestrator.console.model_catalog.discover_codebuddy_models",
+            return_value=catalog,
+        ), mock.patch(
+            "orchestrator.console.model_catalog._run_codebuddy_probe",
+            new=mock.AsyncMock(return_value=probe_results),
+        ):
+            status, payload = _request(
+                self.port,
+                "/api/model-catalog/probe",
+                method="POST",
+                body={"backend": "codebuddy"},
+            )
+            self.assertEqual(status, 200, payload)
+            self.assertEqual(payload["probe"]["available"], 1)
+            self.assertEqual([item["id"] for item in payload["models"]], ["works"])
+
+            status, payload = _request(
+                self.port,
+                "/api/model-catalog?backend=codebuddy",
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual([item["id"] for item in payload["models"]], ["works"])
+
+    def test_console_probe_without_provider_targets_builtins_only(self) -> None:
+        catalog = {
+            "status": "ok",
+            "source": "product.internal.json",
+            "models": [
+                {"id": "builtin-works", "label": "Builtin Works"},
+                {
+                    "id": "volc-works",
+                    "label": "Volc Works",
+                    "provider_id": "volc-codingplan",
+                },
+            ],
+        }
+        probe_results = [
+            {"id": "builtin-works", "provider_id": None, "ok": True},
+        ]
+        with mock.patch(
+            "orchestrator.console.model_catalog.discover_codebuddy_models",
+            return_value=catalog,
+        ), mock.patch(
+            "orchestrator.console.model_catalog._run_codebuddy_probe",
+            new=mock.AsyncMock(return_value=probe_results),
+        ) as probe:
+            status, payload = _request(
+                self.port,
+                "/api/model-catalog/probe",
+                method="POST",
+                body={"backend": "codebuddy"},
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["probe"]["tested"], 1)
+        self.assertEqual(
+            {item["id"] for item in payload["models"]},
+            {"builtin-works", "volc-works"},
+        )
+        probe.assert_awaited_once_with(self.project, [{"id": "builtin-works", "label": "Builtin Works"}])
+
+    def test_codebuddy_catalog_imports_arkcli_user_models_without_secret(self) -> None:
+        from orchestrator.console import model_catalog
+
+        home = Path(self.temp.name) / "home"
+        (home / ".workbuddy-ai").mkdir(parents=True)
+        (home / ".workbuddy-ai" / "models.json").write_text(
+            json.dumps(
+                {
+                    "availableModels": ["arkcli-code"],
+                    "models": [
+                        {
+                            "id": "arkcli-code",
+                            "name": "ArkCLI Code",
+                            "apiKey": "do-not-leak",
+                            "url": "https://example.invalid/v1",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("pathlib.Path.home", return_value=home):
+            result = model_catalog.discover_codebuddy_models(self.project)
+        encoded = json.dumps(result, ensure_ascii=False)
+        self.assertIn("arkcli-code", encoded)
+        self.assertIn("arkcli-user-config", encoded)
+        self.assertNotIn("do-not-leak", encoded)
+
+    def test_console_html_auto_probes_codebuddy_models(self) -> None:
+        html = Path("orchestrator/console/static/index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn('id="probeCodeBuddyModels"', html)
+        self.assertIn("选择 CodeBuddy 后自动测试", html)
+
+    def test_console_can_save_custom_model_provider_without_secret(self) -> None:
+        status, payload = _request(
+            self.port,
+            "/api/model-providers",
+            method="POST",
+            body={
+                "provider_id": "volc-codingplan",
+                "label": "火山 CodingPlan",
+                "backend": "codebuddy",
+                "base_url": "https://example.invalid/api/coding/v3",
+                "api_key_env": "VOLC_CODINGPLAN_API_KEY",
+                "models": [{"id": "doubao-seed-code", "label": "Doubao Seed Code"}],
+                "api_key": "must-not-be-stored",
+            },
+        )
+        self.assertEqual(status, 400, payload)
+
+        status, payload = _request(
+            self.port,
+            "/api/model-providers",
+            method="POST",
+            body={
+                "provider_id": "volc-codingplan",
+                "label": "火山 CodingPlan",
+                "backend": "codebuddy",
+                "base_url": "https://example.invalid/api/coding/v3",
+                "api_key_env": "VOLC_CODINGPLAN_API_KEY",
+                "models": [{"id": "doubao-seed-code", "label": "Doubao Seed Code"}],
+            },
+        )
+        self.assertEqual(status, 200, payload)
+        status, payload = _request(self.port, "/api/model-providers")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["providers"][0]["provider_id"], "volc-codingplan")
+        self.assertNotIn('"api_key"', json.dumps(payload, ensure_ascii=False))
+
+    def test_console_html_has_model_dropdown_without_manual_refresh_action(self) -> None:
+        html = Path("orchestrator/console/static/index.html").read_text(encoding="utf-8")
+        self.assertIn('id="taskModelSelect"', html)
+        self.assertNotIn('id="refreshTaskModels"', html)
+        self.assertIn("内置模型（CodeBuddy 默认）", html)
+        self.assertIn('label="自定义模型提供方"', html)
+        self.assertIn("自定义模型 · ${providerLabel(providerId)}", html)
+        self.assertIn("后台打开中国站授权页", html)
+        self.assertNotIn("点击后会在桌面打开登录窗口", html)
+
+    def test_web_console_can_create_supervisor_task(self) -> None:
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks",
+            method="POST",
+            body={
+                "mode": "supervisor",
+                "task_id": "plan-1",
+                "prompt": "Split this request into two worker tasks.",
+                "cwd": str(self.project),
+                "access_mode": "write",
+                "write_scope": ["should-be-ignored"],
+            },
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["mode"], "supervisor")
+        row = self.store.connection.execute(
+            """
+            SELECT t.access_mode, d.required_role_id
+            FROM tasks t JOIN task_dispatch_specs d ON d.task_id=t.task_id
+            WHERE t.task_id='plan-1'
+            """
+        ).fetchone()
+        self.assertEqual(row["access_mode"], "read_only")
+        self.assertEqual(row["required_role_id"], "supervisor")
 
     def test_teams_save_and_list(self) -> None:
         team = {
@@ -191,6 +488,63 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertIn("fake", backends)
         self.assertIn("codex", backends)
         self.assertIn("codebuddy", backends)
+
+    def test_serve_start_uses_run_team_when_path_is_omitted(self) -> None:
+        team = {
+            "schema_version": 1,
+            "team_id": "saved-team",
+            "bootstrap_supervisor": "supervisor",
+            "roles": [
+                {"role_id": "worker", "version": 1, "title": "W", "required_capabilities": ["read"]},
+                {"role_id": "supervisor", "version": 1, "title": "S", "required_capabilities": ["plan"]},
+            ],
+            "agent_pools": [
+                {"pool_id": "saved-workers", "backend": "fake", "role_id": "worker", "count": 1, "max_count": 1},
+            ],
+        }
+        status, payload = _request(self.port, "/api/teams", method="POST", body={"team": team})
+        self.assertEqual(status, 200, payload)
+        self.store.create_run("saved-run", "saved-team")
+        with mock.patch.object(
+            self.server.serve_manager,
+            "start",
+            return_value={"ok": True, "run_id": "saved-run", "status": "started"},
+        ) as start:
+            status, payload = _request(
+                self.port,
+                "/api/runs/saved-run/serve/start",
+                method="POST",
+                body={},
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["team_id"], "saved-team")
+        self.assertTrue(payload["team_path"].endswith("saved-team.json"))
+        start.assert_called_once()
+        self.assertTrue(str(start.call_args.args[1]).endswith("saved-team.json"))
+
+    def test_serve_start_migrates_legacy_default_team_alias(self) -> None:
+        team_path = self.project / "config" / "team.yaml"
+        team = json.loads(team_path.read_text(encoding="utf-8"))
+        team["team_id"] = "actual-default"
+        team_path.write_text(json.dumps(team), encoding="utf-8")
+        self.store.create_run("legacy-default", "default")
+        with mock.patch.object(
+            self.server.serve_manager,
+            "start",
+            return_value={"ok": True, "run_id": "legacy-default", "status": "started"},
+        ):
+            status, payload = _request(
+                self.port,
+                "/api/runs/legacy-default/serve/start",
+                method="POST",
+                body={},
+            )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["team_id"], "actual-default")
+        row = self.store.connection.execute(
+            "SELECT team_id FROM runs WHERE run_id='legacy-default'"
+        ).fetchone()
+        self.assertEqual(row["team_id"], "actual-default")
 
     def test_serve_start_stop_with_saved_team(self) -> None:
         # 用默认 team 启动 serve 子进程（fake 后端），随后停止
@@ -247,6 +601,50 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertIn(
             by_name["codebuddy"]["logged_in"], (True, False, None)
         )
+        self.assertNotIn("/login", by_name["codebuddy"]["login_command"])
+        self.assertNotIn("/login", by_name["codebuddy"]["note"])
+
+    def test_codebuddy_sdk_probe_fallback_is_used_when_auth_files_are_unreadable(self) -> None:
+        from orchestrator.console import settings as s
+
+        with mock.patch.object(s, "codebuddy_login_state", return_value=None), mock.patch.object(
+            s, "_codebuddy_auth_dir", return_value=self.project
+        ), mock.patch.object(
+            s, "_codebuddy_sdk_login_state", return_value=True
+        ) as sdk_probe, mock.patch.object(
+            s.shutil, "which", return_value=str(self.project / "codebuddy.cmd")
+        ), mock.patch.object(
+            s, "_local_cli_path", return_value=None
+        ), mock.patch.object(
+            s, "_run_version", return_value="test"
+        ):
+            result = s.probe_connections(self.project)
+
+        codebuddy = next(item for item in result if item["backend"] == "codebuddy")
+        self.assertTrue(codebuddy["logged_in"])
+        sdk_probe.assert_called_once()
+
+    def test_codebuddy_unreadable_auth_store_is_not_reported_as_logged_out(self) -> None:
+        from orchestrator.console import settings as s
+
+        with mock.patch.object(s, "codebuddy_login_state", return_value=None), mock.patch.object(
+            s, "_codebuddy_auth_visibility", return_value="unreadable"
+        ), mock.patch.object(
+            s, "_codebuddy_sdk_login_state", return_value=False
+        ) as sdk_probe, mock.patch.object(
+            s.shutil, "which", return_value=str(self.project / "codebuddy.cmd")
+        ), mock.patch.object(
+            s, "_local_cli_path", return_value=None
+        ), mock.patch.object(
+            s, "_run_version", return_value="test"
+        ):
+            result = s.probe_connections(self.project)
+
+        codebuddy = next(item for item in result if item["backend"] == "codebuddy")
+        self.assertIsNone(codebuddy["logged_in"])
+        self.assertEqual(codebuddy["login_probe"], "unreadable")
+        self.assertIn("无权读取", codebuddy["login_status_hint"])
+        sdk_probe.assert_not_called()
 
     def test_connection_login_rejects_fake(self) -> None:
         status, payload = _request(
@@ -259,7 +657,7 @@ class ConsoleServerTests(unittest.TestCase):
 
     def test_connection_login_calls_launcher(self) -> None:
         with mock.patch(
-            "orchestrator.console.settings.launch_login",
+            "orchestrator.console.login_flow.start",
             return_value={"ok": True, "message": "opened", "script": "x.cmd"},
         ) as launcher:
             status, payload = _request(
@@ -271,7 +669,7 @@ class ConsoleServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
         launcher.assert_called_once()
-        self.assertEqual(launcher.call_args.args[1], "codebuddy")
+        self.assertEqual(launcher.call_args.args[0], self.project)
 
 
 class ConsoleBusyTests(unittest.TestCase):
@@ -314,6 +712,29 @@ class ConsoleBusyTests(unittest.TestCase):
             body={"reason": "x"},
         )
         self.assertEqual(status, 409, payload)
+
+    def test_review_can_use_active_serve_lease(self) -> None:
+        # 只有以 serve-* 命名的控制器允许人工审核复用租约；普通控制器仍 busy。
+        self.store.release_run_controller(self.serve_controller)
+        self.serve_controller = self.store.acquire_run_controller(
+            "run-1", "serve-test", lease_seconds=60
+        )
+        with self.store.connection:
+            self.store.connection.execute(
+                "UPDATE authority_leases SET owner_agent_id='serve-test' WHERE run_id='run-1'"
+            )
+        self.store.create_task("run-1", "task-review", cwd=str(self.project))
+        self.store.transition_task("task-review", TaskState.READY, reason="test")
+        self.store.create_attempt("task-review", "attempt-review", "agent-review")
+        self.store.transition_task("task-review", TaskState.REVIEW, reason="test")
+        status, payload = _request(
+            self.port,
+            "/api/runs/run-1/tasks/task-review/review",
+            method="POST",
+            body={"decision": "approve"},
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(self.store.task_state("task-review"), TaskState.COMPLETED)
 
 
 class FindFreePortTests(unittest.TestCase):
@@ -399,8 +820,85 @@ class LoginHelperTests(unittest.TestCase):
         text = script.read_text(encoding="ascii")
         self.assertIn("CODEBUDDY_SKIP_GIT_BASH_CHECK=1", text)
         self.assertIn("CODEBUDDY_INTERNET_ENVIRONMENT=internal", text)
-        self.assertIn("codebuddy.cmd", text)
-        self.assertIn("/login", text)
+        self.assertIn(f'cd /d "{self.project}"', text)
+        self.assertIn("-m orchestrator auth codebuddy --open-browser", text)
+        self.assertNotIn("/login", text)
+
+    def test_codebuddy_login_uses_background_browser_auth(self) -> None:
+        import os
+
+        from orchestrator.console import settings as s
+
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_HUB_CODEBUDDY_BIN": "", "CODEBUDDY_CODE_PATH": ""},
+            clear=False,
+        ), mock.patch.object(s.shutil, "which", return_value=str(self.codex_cli)), mock.patch.object(
+            s, "_local_cli_path", return_value=self.cb_cli
+        ), mock.patch("sys.platform", "win32"), mock.patch.object(
+            s.subprocess, "CREATE_NO_WINDOW", 1, create=True
+        ), mock.patch.object(
+            s.subprocess, "DETACHED_PROCESS", 2, create=True
+        ), mock.patch.object(s.subprocess, "Popen") as popen:
+            popen.return_value = mock.Mock(pid=1234, poll=mock.Mock(return_value=None))
+            result = s.launch_login(self.project, "codebuddy")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["mode"], "background-browser")
+        self.assertEqual(result["pid"], 1234)
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[-3:], ["auth", "codebuddy", "--open-browser"])
+        self.assertEqual(popen.call_args.kwargs["cwd"], str(self.project))
+        launch_env = popen.call_args.kwargs["env"]
+        self.assertEqual(launch_env["CODEBUDDY_INTERNET_ENVIRONMENT"], "internal")
+        self.assertTrue(popen.call_args.kwargs["creationflags"])
+
+    def test_codebuddy_login_prefers_project_venv_python(self) -> None:
+        import os
+
+        from orchestrator.console import settings as s
+
+        venv_python = self.project / ".venv" / "Scripts" / "python.exe"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("", encoding="ascii")
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_HUB_CODEBUDDY_BIN": "", "CODEBUDDY_CODE_PATH": ""},
+            clear=False,
+        ), mock.patch.object(s.shutil, "which", return_value=str(self.codex_cli)), mock.patch.object(
+            s, "_local_cli_path", return_value=self.cb_cli
+        ), mock.patch("sys.platform", "win32"), mock.patch.object(
+            s.subprocess, "CREATE_NO_WINDOW", 1, create=True
+        ), mock.patch.object(
+            s.subprocess, "DETACHED_PROCESS", 2, create=True
+        ), mock.patch.object(s.subprocess, "Popen") as popen:
+            popen.return_value = mock.Mock(pid=5678, poll=mock.Mock(return_value=None))
+            result = s.launch_login(self.project, "codebuddy")
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(popen.call_args.args[0][0], str(venv_python))
+
+    def test_codebuddy_login_reports_immediate_child_exit(self) -> None:
+        import os
+
+        from orchestrator.console import settings as s
+
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_HUB_CODEBUDDY_BIN": "", "CODEBUDDY_CODE_PATH": ""},
+            clear=False,
+        ), mock.patch.object(s.shutil, "which", return_value=str(self.codex_cli)), mock.patch.object(
+            s, "_local_cli_path", return_value=self.cb_cli
+        ), mock.patch("sys.platform", "win32"), mock.patch.object(
+            s.subprocess, "CREATE_NO_WINDOW", 1, create=True
+        ), mock.patch.object(
+            s.subprocess, "DETACHED_PROCESS", 2, create=True
+        ), mock.patch.object(s.subprocess, "Popen") as popen:
+            popen.return_value = mock.Mock(pid=9876, poll=mock.Mock(return_value=2))
+            result = s.launch_login(self.project, "codebuddy")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("exit code 2", result["message"])
 
     def test_codex_script_runs_login(self) -> None:
         result = self._launch("codex")

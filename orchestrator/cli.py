@@ -56,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     auth = subcommands.add_parser("auth", help="sign in a local backend")
     auth.add_argument("backend", choices=("codex", "codebuddy"))
+    auth.add_argument(
+        "--open-browser",
+        action="store_true",
+        help="open the CodeBuddy authorization page automatically",
+    )
     spike = subcommands.add_parser("spike", help="run a Stage 0 capability spike")
     spike.add_argument(
         "target",
@@ -419,7 +424,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] in {"ready", "run-passed"} else 1
     if args.command == "auth":
-        return login(args.backend, Path.cwd())
+        return login(args.backend, Path.cwd(), open_browser=args.open_browser)
     if args.command == "reconcile":
         result = run_reconciler_once(
             Path.cwd(), database_path=args.db, limit=args.limit, run_id=args.run_id

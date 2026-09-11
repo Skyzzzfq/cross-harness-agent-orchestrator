@@ -2,6 +2,18 @@
 
 更新时间：2026-08-31
 
+## 个人开发版整改 R0 补充（2026-09-11）
+
+本节是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的 R0 追加证据，不修改阶段 0 的历史 GO 结论。
+
+- 当前数据库 `.agent-hub/state/agent-hub.db` 为 schema v15；在线备份、独立临时库恢复、`integrity_check` 和 `foreign_key_check` 均通过。
+- 重新执行全量基线：311 项，310 通过、1 跳过；命令和完整结果见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`。
+- Codex 0.147.0 的 SDK 表面提供 `output_schema`、`thread_resume`、`stream`、`steer` 和 `interrupt`；CodeBuddy SDK 0.3.248 / CLI 2.142.0 提供 `--json-schema`、resume、stream-json 和 interrupt，但没有可确认的活动 turn steer，interrupt 也没有确认返回值。
+- 当前两个 Adapter 都仍声明 `supports_structured_output=false`，这属于 R1 的接入缺口，不把 SDK 接口表面冒充为已完成产品能力。
+- Run 6 已分层记录为“Codex backend succeeded，但主管计划 JSON 校验失败”；脱敏回归样本在 `docs/fixtures/run-6-plan-rejected.json`。
+
+R0 能力闸门没有发现必须停止后续契约实现的 SDK 缺失；CodeBuddy 即时引导和取消确认属于明确降级边界，分别留给 R5/R6。完整证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`。
+
 ## 当前结论
 
 状态：**GO。阶段 0 全部退出条件已满足，可以进入阶段 1。**

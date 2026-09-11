@@ -74,6 +74,96 @@ class TaskBackendRoutingTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(bound["backend"], "fake")
 
+    def test_task_model_routes_to_matching_agent_model(self) -> None:
+        self.store.create_run("run-2", "team-2")
+        reconcile_pool_once(
+            self.store,
+            "run-2",
+            AgentPoolSpec(
+                pool_id="pool-codex", backend="codex", role_id="worker",
+                count=1, max_count=1, model="gpt-test",
+            ),
+        )
+        self.store.create_task(
+            "run-2", "task-model", cwd=str(self.temp.name),
+            required_backend="codex", required_model="gpt-test",
+        )
+        self.store.transition_task("task-model", TaskState.READY, reason="ready")
+        authority = self.store.acquire_authority("run-2", "op", "supervisor")
+        controller = self.store.acquire_run_controller("run-2", "op", lease_seconds=60)
+        try:
+            claim = self.store.claim_ready_dispatch(
+                "run-2", controller=controller, authority=authority, lease_seconds=60
+            )
+        finally:
+            self.store.release_run_controller(controller)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.session.backend, "codex")
+        self.assertEqual(claim.session.model, "gpt-test")
+
+    def test_task_model_does_not_fall_back_to_another_model(self) -> None:
+        self.store.create_run("run-2", "team-2")
+        reconcile_pool_once(
+            self.store,
+            "run-2",
+            AgentPoolSpec(
+                pool_id="pool-codex", backend="codex", role_id="worker",
+                count=1, max_count=1, model="gpt-test",
+            ),
+        )
+        self.store.create_task(
+            "run-2", "task-model-mismatch", cwd=str(self.temp.name),
+            required_backend="codex", required_model="other-model",
+        )
+        self.store.transition_task(
+            "task-model-mismatch", TaskState.READY, reason="ready"
+        )
+        authority = self.store.acquire_authority("run-2", "op", "supervisor")
+        controller = self.store.acquire_run_controller("run-2", "op", lease_seconds=60)
+        try:
+            claim = self.store.claim_ready_dispatch(
+                "run-2", controller=controller, authority=authority, lease_seconds=60
+            )
+        finally:
+            self.store.release_run_controller(controller)
+        self.assertIsNone(claim)
+
+    def test_task_provider_routes_to_matching_codebuddy_provider(self) -> None:
+        self.store.create_run("run-provider", "team-provider")
+        pool = AgentPoolSpec(
+            pool_id="codebuddy-volc",
+            backend="codebuddy",
+            role_id="worker",
+            count=1,
+            max_count=1,
+            model="doubao-seed-code",
+            provider_id="volc-codingplan",
+        )
+        reconcile_pool_once(self.store, "run-provider", pool)
+        self.store.create_task(
+            "run-provider",
+            "task-provider",
+            cwd=str(self.temp.name),
+            required_backend="codebuddy",
+            required_model="doubao-seed-code",
+            required_provider_id="volc-codingplan",
+        )
+        self.store.transition_task("task-provider", TaskState.READY, reason="ready")
+        authority = self.store.acquire_authority(
+            "run-provider", "op", "supervisor"
+        )
+        controller = self.store.acquire_run_controller(
+            "run-provider", "op", lease_seconds=60
+        )
+        try:
+            claim = self.store.claim_ready_dispatch(
+                "run-provider", controller=controller, authority=authority, lease_seconds=60
+            )
+        finally:
+            self.store.release_run_controller(controller)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.session.provider_id, "volc-codingplan")
+
 
 if __name__ == "__main__":
     unittest.main()

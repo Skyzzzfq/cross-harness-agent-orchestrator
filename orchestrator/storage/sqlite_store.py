@@ -60,6 +60,8 @@ def _call_request_digest(request: AdapterCallRequest) -> str:
         "agent_id": request.agent_id,
         "session_id": request.session.session_id,
         "backend": request.session.backend,
+        "model": request.session.model,
+        "provider_id": request.session.provider_id,
         "prompt": request.prompt,
         "policy": {
             "access_mode": request.policy.access_mode,
@@ -141,7 +143,7 @@ class FencedAuthorityError(RuntimeError):
 
 
 # 当前数据库 schema 版本；迁移与测试共用，新增迁移时同步 +1。
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 15
 
 
 class SQLiteStateStore:
@@ -268,6 +270,269 @@ class SQLiteStateStore:
                 )
             self.connection.commit()
             return ControllerToken(run_id, owner_id, epoch, expires_at)
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def active_run_controller(self, run_id: str) -> dict[str, Any] | None:
+        """Return the current controller lease when it is still valid.
+
+        The console uses this only for explicitly supported operator actions
+        while the long-running ``serve`` loop owns the lease.  Returning the
+        lease as data keeps the fencing token immutable and avoids stealing the
+        controller from the scheduler.
+        """
+        now = self._aware_datetime(None).isoformat()
+        row = self.connection.execute(
+            """
+            SELECT run_id, owner_id, epoch, acquired_at, heartbeat_at, expires_at
+            FROM run_controller_leases
+            WHERE run_id = ? AND expires_at > ?
+            """,
+            (run_id, now),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def materialize_supervisor_plan(
+        self,
+        run_id: str,
+        supervisor_task_id: str,
+        plan: Any,
+        *,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+        worker_cwd: str | None = None,
+        max_attempts: int = 2,
+        timeout_seconds: float = 120,
+    ) -> dict[str, Any]:
+        """Atomically turn one validated supervisor plan into worker tasks."""
+        if controller.run_id != run_id or authority.run_id != run_id:
+            raise FencedControllerError("plan tokens belong to another Run")
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            parent = self.connection.execute(
+                """
+                SELECT t.run_id, t.state, d.cwd
+                FROM tasks t
+                JOIN task_dispatch_specs d ON d.task_id = t.task_id
+                WHERE t.task_id = ?
+                """,
+                (supervisor_task_id,),
+            ).fetchone()
+            if parent is None or parent["run_id"] != run_id:
+                raise KeyError(supervisor_task_id)
+            existing_event = self.connection.execute(
+                """
+                SELECT data_json FROM events
+                WHERE run_id = ? AND task_id = ? AND kind = 'plan.materialized'
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (run_id, supervisor_task_id),
+            ).fetchone()
+            if existing_event is not None:
+                data = json.loads(existing_event["data_json"])
+                if data.get("plan_digest") == plan.digest:
+                    self.connection.commit()
+                    return {
+                        "status": "already-materialized",
+                        "supervisor_task_id": supervisor_task_id,
+                        "task_ids": list(data.get("task_ids", ())),
+                        "plan_digest": plan.digest,
+                    }
+                raise ValueError("supervisor task already materialized a different plan")
+            if parent["state"] != TaskState.REVIEW.value:
+                raise ValueError(
+                    f"supervisor task {supervisor_task_id} is {parent['state']}, "
+                    "must be REVIEW"
+                )
+
+            task_ids = [task.task_id for task in plan.tasks]
+            if len(set(task_ids)) != len(task_ids):
+                raise ValueError("supervisor plan contains duplicate task_id values")
+            existing_ids = {
+                str(row["task_id"])
+                for row in self.connection.execute(
+                    "SELECT task_id FROM tasks WHERE run_id = ?", (run_id,)
+                )
+            }
+            duplicate = set(task_ids) & existing_ids
+            if duplicate:
+                raise ValueError(f"task already exists: {sorted(duplicate)}")
+            cwd = str(worker_cwd or parent["cwd"])
+            normalized: list[dict[str, Any]] = []
+            for task in plan.tasks:
+                scope = tuple(task.write_scope)
+                self._validate_task_spec(
+                    task_id=task.task_id,
+                    access_mode=task.access_mode,
+                    max_attempts=max_attempts,
+                    required_role_id=task.role_id,
+                    required_backend=task.backend,
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    retry_backoff_base_seconds=1,
+                    retry_backoff_max_seconds=60,
+                )
+                if task.access_mode != "write" and scope:
+                    raise ValueError(
+                        f"read_only task {task.task_id} cannot declare write_scope"
+                    )
+                task_cwd = cwd
+                if self.workspace_policy is not None:
+                    task_cwd = self.workspace_policy.validate_cwd(
+                        task.access_mode, cwd
+                    )
+                    if task.access_mode == "write":
+                        scope = self.workspace_policy.validate_write_scope(
+                            scope, base=task_cwd
+                        )
+                elif task.access_mode == "write":
+                    from orchestrator.workspace.policy import validate_write_scope_static
+
+                    scope = validate_write_scope_static(scope)
+                normalized.append(
+                    {
+                        "task_id": task.task_id,
+                        "access_mode": task.access_mode,
+                        "write_scope": scope,
+                        "max_attempts": max_attempts,
+                        "required_role_id": task.role_id,
+                        "required_backend": task.backend,
+                        "required_model": None,
+                        "prompt": task.prompt,
+                        "cwd": task_cwd,
+                        "timeout_seconds": timeout_seconds,
+                        "priority": 0,
+                        "retry_backoff_base_seconds": 1,
+                        "retry_backoff_max_seconds": 60,
+                    }
+                )
+
+            dependencies = [
+                (task.task_id, dependency)
+                for task in plan.tasks
+                for dependency in task.depends_on
+            ]
+            task_id_set = set(task_ids)
+            if any(dependency not in task_id_set for _, dependency in dependencies):
+                raise ValueError("unknown dependency task in supervisor plan")
+            graph_nodes = existing_ids | task_id_set
+            graph_edges = [
+                (str(row["task_id"]), str(row["depends_on_task_id"]))
+                for row in self.connection.execute(
+                    """
+                    SELECT task_id, depends_on_task_id FROM task_dependencies
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                )
+            ] + dependencies
+            remaining = {node: 0 for node in graph_nodes}
+            dependents: dict[str, list[str]] = {node: [] for node in graph_nodes}
+            for task_id, dependency in graph_edges:
+                remaining[task_id] += 1
+                dependents[dependency].append(task_id)
+            ready = [node for node, count in remaining.items() if count == 0]
+            visited = 0
+            while ready:
+                node = ready.pop()
+                visited += 1
+                for dependent in dependents[node]:
+                    remaining[dependent] -= 1
+                    if remaining[dependent] == 0:
+                        ready.append(dependent)
+            if visited != len(graph_nodes):
+                raise ValueError("task dependency graph contains a cycle")
+
+            for spec in normalized:
+                self._create_task_tx(run_id=run_id, now=now, **spec)
+            for task_id, dependency in dependencies:
+                self.connection.execute(
+                    """
+                    INSERT INTO task_dependencies(
+                        run_id, task_id, depends_on_task_id, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (run_id, task_id, dependency, now),
+                )
+            self._reconcile_task_graph_tx(run_id, now)
+            self._append_event(
+                run_id,
+                supervisor_task_id,
+                None,
+                "plan.materialized",
+                TaskState.REVIEW.value,
+                TaskState.REVIEW.value,
+                {
+                    "plan_digest": plan.digest,
+                    "task_ids": task_ids,
+                    "controller_epoch": controller.epoch,
+                    "authority_epoch": authority.epoch,
+                },
+            )
+            self.connection.commit()
+            return {
+                "status": "materialized",
+                "supervisor_task_id": supervisor_task_id,
+                "task_ids": task_ids,
+                "plan_digest": plan.digest,
+            }
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def record_supervisor_plan_rejection(
+        self,
+        run_id: str,
+        supervisor_task_id: str,
+        *,
+        call_id: str,
+        reason: str,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+    ) -> bool:
+        """Record one rejection for a supervisor result, idempotently."""
+        now = utc_now()
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            parent = self.connection.execute(
+                "SELECT run_id FROM tasks WHERE task_id = ?",
+                (supervisor_task_id,),
+            ).fetchone()
+            if parent is None or parent["run_id"] != run_id:
+                raise KeyError(supervisor_task_id)
+            duplicate = self.connection.execute(
+                """
+                SELECT 1 FROM events
+                WHERE run_id = ? AND task_id = ? AND kind = 'plan.rejected'
+                  AND json_extract(data_json, '$.call_id') = ?
+                LIMIT 1
+                """,
+                (run_id, supervisor_task_id, call_id),
+            ).fetchone()
+            if duplicate is not None:
+                self.connection.commit()
+                return False
+            self._append_event(
+                run_id,
+                supervisor_task_id,
+                None,
+                "plan.rejected",
+                TaskState.REVIEW.value,
+                TaskState.REVIEW.value,
+                {"call_id": call_id, "reason": reason[:500]},
+            )
+            self.connection.commit()
+            return True
         except BaseException:
             self.connection.rollback()
             raise
@@ -877,9 +1142,11 @@ class SQLiteStateStore:
             candidates = self.connection.execute(
                 """
                 SELECT t.task_id, t.run_id, t.access_mode, t.write_scope_json,
-                       t.max_attempts, d.required_role_id, d.instruction_text,
+                       t.max_attempts, d.required_role_id, d.required_model,
+                       d.required_provider_id,
+                       d.instruction_text,
                        d.cwd, d.timeout_seconds,
-                       a.agent_id, a.backend, b.binding_id,
+                       a.agent_id, a.backend, a.model, a.provider_id, b.binding_id,
                        s.session_ref_id, s.provider_session_id
                 FROM tasks t
                 JOIN task_dispatch_specs d ON d.task_id = t.task_id
@@ -903,6 +1170,10 @@ class SQLiteStateStore:
                   AND d.paused = 0
                   AND (d.required_backend IS NULL OR d.required_backend = ''
                        OR d.required_backend = a.backend)
+                  AND (d.required_model IS NULL OR d.required_model = ''
+                       OR d.required_model = a.model)
+                  AND (d.required_provider_id IS NULL OR d.required_provider_id = ''
+                       OR d.required_provider_id = a.provider_id)
                 ORDER BY d.priority DESC, t.created_at, t.task_id,
                          a.created_at, a.agent_id
                 """,
@@ -955,6 +1226,8 @@ class SQLiteStateStore:
                     session_id=row["session_ref_id"],
                     backend=row["backend"],
                     provider_session_id=row["provider_session_id"],
+                    model=row["model"],
+                    provider_id=row["required_provider_id"] or row["provider_id"],
                 ),
                 prompt=row["instruction_text"],
                 policy=AccessPolicy(
@@ -3697,6 +3970,7 @@ class SQLiteStateStore:
         pool_id: str,
         backend: str,
         model: str | None,
+        provider_id: str | None = None,
         role_id: str,
         role_version: int = 1,
     ) -> dict[str, str]:
@@ -3714,12 +3988,21 @@ class SQLiteStateStore:
             self.connection.execute(
                 """
                 INSERT INTO agent_instances(
-                    agent_id, team_id, pool_id, backend, model, status,
+                    agent_id, team_id, pool_id, backend, model, provider_id, status,
                     capabilities_actual_json, authority_epoch, origin,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'IDLE', '[]', 0, 'RECONCILER', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'IDLE', '[]', 0, 'RECONCILER', ?, ?)
                 """,
-                (agent_id, run["team_id"], pool_id, backend, model, now, now),
+                (
+                    agent_id,
+                    run["team_id"],
+                    pool_id,
+                    backend,
+                    model,
+                    provider_id,
+                    now,
+                    now,
+                ),
             )
             self.connection.execute(
                 """
@@ -3937,6 +4220,8 @@ class SQLiteStateStore:
         max_attempts: int = 2,
         required_role_id: str = "worker",
         required_backend: str | None = None,
+        required_model: str | None = None,
+        required_provider_id: str | None = None,
         prompt: str | None = None,
         cwd: str = ".",
         timeout_seconds: float = 60,
@@ -3950,6 +4235,8 @@ class SQLiteStateStore:
             max_attempts=max_attempts,
             required_role_id=required_role_id,
             required_backend=required_backend,
+            required_model=required_model,
+            required_provider_id=required_provider_id,
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             retry_backoff_base_seconds=retry_backoff_base_seconds,
@@ -3980,6 +4267,8 @@ class SQLiteStateStore:
                 max_attempts=max_attempts,
                 required_role_id=required_role_id,
                 required_backend=required_backend,
+                required_model=required_model,
+                required_provider_id=required_provider_id,
                 prompt=prompt,
                 cwd=cwd,
                 timeout_seconds=timeout_seconds,
@@ -4004,6 +4293,8 @@ class SQLiteStateStore:
             "max_attempts",
             "required_role_id",
             "required_backend",
+            "required_model",
+            "required_provider_id",
             "prompt",
             "cwd",
             "timeout_seconds",
@@ -4028,6 +4319,8 @@ class SQLiteStateStore:
                 "max_attempts": int(raw.get("max_attempts", 2)),
                 "required_role_id": str(raw.get("required_role_id", "worker")),
                 "required_backend": raw.get("required_backend"),
+                "required_model": raw.get("required_model"),
+                "required_provider_id": raw.get("required_provider_id"),
                 "prompt": raw.get("prompt"),
                 "cwd": str(raw.get("cwd", ".")),
                 "timeout_seconds": float(raw.get("timeout_seconds", 60)),
@@ -4044,6 +4337,9 @@ class SQLiteStateStore:
                 access_mode=spec["access_mode"],
                 max_attempts=spec["max_attempts"],
                 required_role_id=spec["required_role_id"],
+                required_backend=spec["required_backend"],
+                required_model=spec["required_model"],
+                required_provider_id=spec["required_provider_id"],
                 cwd=spec["cwd"],
                 timeout_seconds=spec["timeout_seconds"],
                 retry_backoff_base_seconds=spec["retry_backoff_base_seconds"],
@@ -4158,6 +4454,8 @@ class SQLiteStateStore:
         retry_backoff_base_seconds: int,
         retry_backoff_max_seconds: int,
         required_backend: str | None = None,
+        required_model: str | None = None,
+        required_provider_id: str | None = None,
     ) -> None:
         if not task_id.strip():
             raise ValueError("task_id must not be empty")
@@ -4169,6 +4467,10 @@ class SQLiteStateStore:
             raise ValueError("required_role_id must not be empty")
         if required_backend is not None and not required_backend.strip():
             raise ValueError("required_backend must not be empty when provided")
+        if required_model is not None and not str(required_model).strip():
+            raise ValueError("required_model must not be empty when provided")
+        if required_provider_id is not None and not str(required_provider_id).strip():
+            raise ValueError("required_provider_id must not be empty when provided")
         if not cwd.strip():
             raise ValueError("cwd must not be empty")
         if timeout_seconds <= 0:
@@ -4190,6 +4492,8 @@ class SQLiteStateStore:
         max_attempts: int,
         required_role_id: str,
         required_backend: str | None,
+        required_model: str | None,
+        required_provider_id: str | None = None,
         prompt: str | None,
         cwd: str,
         timeout_seconds: float,
@@ -4219,15 +4523,19 @@ class SQLiteStateStore:
         self.connection.execute(
             """
             INSERT INTO task_dispatch_specs(
-                task_id, required_role_id, required_backend, instruction_text, cwd,
+                task_id, required_role_id, required_backend, required_model,
+                required_provider_id,
+                instruction_text, cwd,
                 timeout_seconds, priority, available_at,
                 retry_backoff_base_seconds, retry_backoff_max_seconds
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 required_role_id,
                 required_backend,
+                required_model,
+                required_provider_id,
                 prompt if prompt is not None else task_id,
                 cwd,
                 timeout_seconds,
@@ -4870,6 +5178,99 @@ class SQLiteStateStore:
             raise KeyError(task_id)
         return row["terminal_reason"]
 
+    def delete_task(
+        self,
+        run_id: str,
+        task_id: str,
+        controller: ControllerToken,
+        authority: AuthorityToken,
+        *,
+        reason: str = "console-delete",
+    ) -> dict[str, str]:
+        """Remove a task and its execution records without stealing a lease.
+
+        Only non-running work may be deleted. Events remain as an audit trail;
+        child records are removed in FK-safe order so the task row can be
+        removed without leaving an executable dispatch behind.
+        """
+        if controller.run_id != run_id or authority.run_id != run_id:
+            raise FencedControllerError("task delete token belongs to another Run")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            now = self._aware_datetime(None).isoformat()
+            self._ensure_controller_tx(controller, now)
+            self._ensure_authority_tx(authority, now)
+            task = self.connection.execute(
+                "SELECT state FROM tasks WHERE task_id = ? AND run_id = ?",
+                (task_id, run_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            state = str(task["state"])
+            if state in {"ACTIVE", "INTEGRATION", "CANCEL_REQUESTED"}:
+                raise ValueError(
+                    f"task {task_id} is {state}; cancel and wait before deleting"
+                )
+            active_call = self.connection.execute(
+                """
+                SELECT call_id FROM backend_calls
+                WHERE task_id = ? AND state IN ('starting', 'running', 'cancel_requested')
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            if active_call is not None:
+                raise ValueError(
+                    f"task {task_id} still has an active backend call "
+                    f"{active_call['call_id']}"
+                )
+
+            self._append_event(
+                run_id,
+                task_id,
+                None,
+                "task.deleted",
+                state,
+                None,
+                {"reason": reason[:200], "controller_epoch": controller.epoch},
+            )
+            self.connection.execute(
+                "DELETE FROM approval_decisions WHERE request_id IN "
+                "(SELECT request_id FROM approval_requests WHERE task_id = ?)",
+                (task_id,),
+            )
+            for table in (
+                "approval_requests",
+                "assignment_leases",
+                "backend_calls",
+                "messages",
+                "review_decisions",
+                "merge_queue",
+                "integration_issues",
+                "role_bindings",
+            ):
+                self.connection.execute(
+                    f"DELETE FROM {table} WHERE task_id = ?", (task_id,)
+                )
+            self.connection.execute(
+                "DELETE FROM task_dependencies "
+                "WHERE task_id = ? OR depends_on_task_id = ?",
+                (task_id, task_id),
+            )
+            self.connection.execute(
+                "DELETE FROM task_dispatch_specs WHERE task_id = ?", (task_id,)
+            )
+            self.connection.execute("DELETE FROM attempts WHERE task_id = ?", (task_id,))
+            self.connection.execute(
+                "DELETE FROM tasks WHERE task_id = ? AND run_id = ?",
+                (task_id, run_id),
+            )
+            self.connection.commit()
+            return {"run_id": run_id, "task_id": task_id, "state": state}
+        except BaseException:
+            self.connection.rollback()
+            raise
+
     def expired_active_attempts(
         self,
         *,
@@ -5073,6 +5474,10 @@ class SQLiteStateStore:
             self._migrate_to_v12()
         if version < 13:
             self._migrate_to_v13()
+        if version < 14:
+            self._migrate_to_v14()
+        if version < 15:
+            self._migrate_to_v15()
 
     def _migrate_to_v3(self) -> None:
         with self.connection:
@@ -5570,6 +5975,56 @@ class SQLiteStateStore:
                 "ON task_dispatch_specs(required_backend)"
             )
             self.connection.execute("PRAGMA user_version=13")
+
+    def _migrate_to_v14(self) -> None:
+        # 任务可按具体模型路由；NULL/空表示沿用后端池中任意模型。
+        with self.connection:
+            cols = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(task_dispatch_specs)"
+                )
+            }
+            if "required_model" not in cols:
+                self.connection.execute(
+                    "ALTER TABLE task_dispatch_specs "
+                    "ADD COLUMN required_model TEXT"
+                )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dispatch_backend_model "
+                "ON task_dispatch_specs(required_backend, required_model)"
+            )
+            self.connection.execute("PRAGMA user_version=14")
+
+    def _migrate_to_v15(self) -> None:
+        # 任务和 Agent 池可绑定 CodeBuddy 的具体提供方（例如火山 CodingPlan）。
+        with self.connection:
+            agent_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(agent_instances)"
+                )
+            }
+            if "provider_id" not in agent_columns:
+                self.connection.execute(
+                    "ALTER TABLE agent_instances ADD COLUMN provider_id TEXT"
+                )
+            dispatch_columns = {
+                row["name"]
+                for row in self.connection.execute(
+                    "PRAGMA table_info(task_dispatch_specs)"
+                )
+            }
+            if "required_provider_id" not in dispatch_columns:
+                self.connection.execute(
+                    "ALTER TABLE task_dispatch_specs "
+                    "ADD COLUMN required_provider_id TEXT"
+                )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dispatch_provider "
+                "ON task_dispatch_specs(required_provider_id)"
+            )
+            self.connection.execute("PRAGMA user_version=15")
 
     def _latest_run_for_team(self, team_id: str) -> str | None:
         row = self.connection.execute(
