@@ -19,7 +19,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import socket
+import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -43,6 +45,78 @@ except Exception:  # pragma: no cover
 
 def _rows(rows: list[Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
+
+
+def _human_task_prompt(text: str) -> str:
+    """Hide the internal supervisor protocol from the user-facing chat."""
+    value = str(text or "").strip()
+    if "USER GOAL:" in value:
+        value = value.split("USER GOAL:", 1)[1]
+        for marker in ("\n\nROLE/POOL DIRECTORY:", "\n\nBUDGET:", "\n\nLEGAL PLAN SHAPE:"):
+            if marker in value:
+                value = value.split(marker, 1)[0]
+        value = value.strip()
+    return value or str(text or "")
+
+
+def _human_result_text(
+    result: dict[str, Any],
+    failure: dict[str, Any],
+    *,
+    role_id: str = "",
+) -> str:
+    """Render adapter envelopes as readable text instead of protocol JSON."""
+    text = result.get("text")
+    structured = result.get("structured")
+    candidate: Any = structured
+    if isinstance(text, str) and text.strip():
+        stripped = text.strip()
+        try:
+            parsed = json.loads(stripped)
+        except (TypeError, ValueError):
+            return stripped
+        candidate = parsed
+    if not isinstance(candidate, dict):
+        if text is not None:
+            return str(text)
+        if failure:
+            return str(failure.get("message") or failure.get("error") or "Agent 执行失败")
+        return "（Agent 尚未返回内容）"
+
+    summary = candidate.get("summary") or candidate.get("supervisor_response")
+    tasks = candidate.get("tasks")
+    if isinstance(tasks, list):
+        lines: list[str] = []
+        if summary:
+            lines.append(f"主管：{summary}")
+        lines.append(f"主管已完成规划，共 {len(tasks)} 个 Worker 任务：")
+        for index, item in enumerate(tasks, 1):
+            if not isinstance(item, dict):
+                lines.append(f"{index}. {item}")
+                continue
+            task_id = str(item.get("task_id") or f"任务 {index}")
+            instruction = str(item.get("instruction") or item.get("prompt") or "")
+            role = str(item.get("role_id") or "worker")
+            suffix = f"（{role}）" if role else ""
+            lines.append(f"{index}. {task_id}{suffix}：{instruction}".rstrip("："))
+        return "\n".join(lines)
+    if summary:
+        return str(summary)
+
+    # Worker adapters may return a small structured object.  Keep it readable
+    # without exposing JSON syntax, while retaining all useful fields.
+    lines = []
+    for key, value in candidate.items():
+        if key in {"plan_version", "revision", "worker_concurrency"}:
+            continue
+        if isinstance(value, (dict, list)):
+            value = ", ".join(str(item) for item in value) if isinstance(value, list) else str(value)
+        lines.append(f"{key}: {value}")
+    if lines:
+        return "\n".join(lines)
+    if failure:
+        return str(failure.get("message") or failure.get("error") or "Agent 执行失败")
+    return "（Agent 返回了空内容）"
 
 
 class ConsoleHandler(BaseHTTPRequestHandler):
@@ -151,6 +225,14 @@ class ConsoleHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        run_prefix = "/api/runs/"
+        if path.startswith(run_prefix):
+            run_id = path[len(run_prefix):].strip("/")
+            if "/" in run_id or not run_id:
+                self._send_error_json(400, "run_id must not be empty")
+                return
+            self._delete_run(run_id)
+            return
         prefix = "/api/model-providers/"
         if path.startswith(prefix):
             provider_id = path[len(prefix):].strip()
@@ -178,6 +260,85 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "project_id": project_id})
             return
         self._send_error_json(404, "not found")
+
+    def _delete_run(self, run_id: str) -> None:
+        """Delete only this Run's managed local state after explicit UI confirmation."""
+        store = self.server.store
+        run = store.connection.execute(
+            "SELECT run_id FROM runs WHERE run_id=?", (run_id,)
+        ).fetchone()
+        if run is None:
+            self._send_error_json(404, f"run not found: {run_id}")
+            return
+        if self._serve_status(run_id).get("running"):
+            self._send_error_json(409, "请先停止该 Run 的 serve 后再删除")
+            return
+        active = store.connection.execute(
+            "SELECT task_id, state FROM tasks WHERE run_id=? "
+            "AND state IN ('ACTIVE','INTEGRATION','CANCEL_REQUESTED') LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if active is not None:
+            self._send_error_json(
+                409,
+                f"Run 仍有活动任务 {active['task_id']}（{active['state']}），请先取消或等待结束",
+            )
+            return
+
+        project_root = self.server.project_root.resolve()
+        hub_root = (project_root / ".agent-hub").resolve()
+        worktrees_root = (hub_root / "worktrees").resolve()
+        runs_root = (hub_root / "runs").resolve()
+        candidates = [worktrees_root / run_id, runs_root / run_id]
+        manager = getattr(store, "workspace_manager", None)
+        if manager is not None and hasattr(manager, "run_root"):
+            try:
+                candidates.append(Path(manager.run_root(run_id)))
+            except (OSError, ValueError):
+                pass
+        unique: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.resolve(strict=False)
+            if resolved in unique:
+                continue
+            # Every removable target is one direct child of a fixed managed
+            # root.  This prevents a malformed Run id from reaching the repo.
+            if resolved.parent not in {worktrees_root, runs_root}:
+                self._send_error_json(400, "run workspace is outside the managed roots")
+                return
+            unique.append(resolved)
+
+        removed: list[str] = []
+        try:
+            for target in unique:
+                if not target.exists() and not target.is_symlink():
+                    continue
+                if target.parent == worktrees_root:
+                    subprocess.run(
+                        ["git", "-C", str(project_root), "worktree", "remove", "--force", str(target)],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                    )
+                if target.is_symlink():
+                    target.unlink()
+                elif target.exists():
+                    shutil.rmtree(target)
+                removed.append(str(target))
+        except OSError as exc:
+            self._send_error_json(500, f"删除 Run 文件失败：{type(exc).__name__}")
+            return
+
+        try:
+            deleted = store.mark_run_deleted(run_id, reason="console-delete")
+        except ValueError as exc:
+            self._send_error_json(409, str(exc))
+            return
+        except KeyError:
+            self._send_error_json(404, f"run not found: {run_id}")
+            return
+        self.server._run_worktrees.pop(run_id, None)
+        self._send_json({"ok": True, "deleted": True, **deleted, "removed_paths": removed})
 
     def _save_team(self, body: dict[str, Any]) -> None:
         from orchestrator.console.settings import save_team_config
@@ -347,8 +508,9 @@ class ConsoleHandler(BaseHTTPRequestHandler):
     def _get_runs(self) -> None:
         store = self.server.store
         rows = store.connection.execute(
-            "SELECT run_id, team_id, control_state, created_at FROM runs "
-            "ORDER BY created_at, run_id"
+            "SELECT r.run_id, r.team_id, r.control_state, r.created_at FROM runs r "
+            "LEFT JOIN deleted_runs d ON d.run_id=r.run_id "
+            "WHERE d.run_id IS NULL ORDER BY r.created_at, r.run_id"
         ).fetchall()
         runs: list[dict[str, Any]] = []
         for row in rows:
@@ -440,6 +602,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                         (run_id,),
                     ).fetchall()
                 )
+                for item in payload:
+                    item["display_instruction"] = _human_task_prompt(
+                        str(item.get("instruction_text") or "")
+                    )
             elif resource == "models":
                 run = store.connection.execute(
                     "SELECT team_id FROM runs WHERE run_id=?", (run_id,)
@@ -625,6 +791,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             """
             SELECT t.task_id, t.state, t.access_mode, t.created_at,
                    t.parent_task_id, t.dispatch_source, t.required_delivery,
+                   t.task_kind,
                    d.required_role_id, d.instruction_text, d.cwd
             FROM tasks t
             JOIN task_dispatch_specs d ON d.task_id = t.task_id
@@ -660,7 +827,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "agent_id": None,
                 "backend": None,
                 "state": "submitted",
-                "text": str(task["instruction_text"] or ""),
+                "text": _human_task_prompt(str(task["instruction_text"] or "")),
                 "created_at": str(task["created_at"] or ""),
             }]
             protocol_rows = store.connection.execute(
@@ -705,21 +872,17 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             for call in calls:
                 result_json = decode(call["result_json"])
                 failure_json = decode(call["failure_json"])
-                text = result_json.get("text")
-                if text is None and result_json.get("structured"):
-                    text = json.dumps(
-                        result_json["structured"], ensure_ascii=False, indent=2
-                    )
-                if text is None and failure_json:
-                    text = failure_json.get("message") or json.dumps(
-                        failure_json, ensure_ascii=False
-                    )
-                if text is None:
-                    text = "（Agent 尚未返回内容）"
+                text = _human_result_text(
+                    result_json,
+                    failure_json,
+                    role_id=str(task["required_role_id"] or ""),
+                )
                 call_agent_id = str(call["agent_id"] or "")
                 if call_agent_id:
                     agents[call_agent_id] = {
+                        **agents.get(call_agent_id, {}),
                         "agent_id": call_agent_id,
+                        "role_id": str(task["required_role_id"] or "unassigned"),
                         "backend": call["backend"],
                         "model": call["model"],
                         "provider_id": call["provider_id"],
@@ -745,9 +908,10 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                 "access_mode": task["access_mode"],
                 "parent_task_id": task["parent_task_id"],
                 "dispatch_source": task["dispatch_source"],
+                "task_kind": task["task_kind"],
                 "required_delivery": bool(task["required_delivery"]),
                 "role_id": task["required_role_id"],
-                "prompt": task["instruction_text"],
+                "prompt": _human_task_prompt(str(task["instruction_text"] or "")),
                 "messages": messages,
                 "handoffs": store.list_handoffs(run_id, task_id=task_id),
                 "results": store.list_task_results(run_id, task_id=task_id),
@@ -772,6 +936,18 @@ class ConsoleHandler(BaseHTTPRequestHandler):
             if isinstance(item, dict) and item.get("role_id")
         }
         for row in role_rows:
+            agent_id_value = str(row["agent_id"])
+            agent = {
+                "agent_id": agent_id_value,
+                "role_id": str(row["role_id"]),
+                "backend": row["backend"],
+                "model": row["model"],
+                "provider_id": row["provider_id"],
+                "status": row["status"],
+            }
+            # Include idle configured agents as well as agents that already
+            # made a backend call, so every role has its own chat context.
+            agents[agent_id_value] = agent
             role = roles.setdefault(
                 str(row["role_id"]),
                 {
@@ -780,15 +956,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
                     "agents": [],
                 },
             )
-            role["agents"].append(
-                {
-                    "agent_id": str(row["agent_id"]),
-                    "backend": row["backend"],
-                    "model": row["model"],
-                    "provider_id": row["provider_id"],
-                    "status": row["status"],
-                }
-            )
+            role["agents"].append(agent)
         return {
             "project": project,
             "roles": list(roles.values()),

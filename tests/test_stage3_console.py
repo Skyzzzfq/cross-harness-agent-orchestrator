@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from orchestrator.console.server import ConsoleHTTPServer
+from orchestrator.console.server import _human_result_text
 from orchestrator.core.models import TaskState
 from orchestrator.storage.sqlite_store import SQLiteStateStore
 
@@ -116,6 +117,34 @@ class ConsoleServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 409)
 
+    def test_console_can_delete_run_and_only_remove_managed_directories(self) -> None:
+        hub = self.project / ".agent-hub"
+        worktree = hub / "worktrees" / "run-1"
+        runtime = hub / "runs" / "run-1"
+        worktree.mkdir(parents=True)
+        runtime.mkdir(parents=True)
+        sentinel = self.project / "keep-me.txt"
+        sentinel.write_text("project root stays", encoding="utf-8")
+
+        status, payload = _request(
+            self.port, "/api/runs/run-1", method="DELETE", body={"reason": "test"}
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertFalse(worktree.exists())
+        self.assertFalse(runtime.exists())
+        self.assertTrue(sentinel.exists())
+        status, listed = _request(self.port, "/api/runs")
+        self.assertEqual(status, 200)
+        self.assertNotIn("run-1", {item["run_id"] for item in listed["runs"]})
+        deleted = self.store.connection.execute(
+            "SELECT reason FROM deleted_runs WHERE run_id='run-1'"
+        ).fetchone()
+        self.assertEqual(deleted["reason"], "console-delete")
+        event = self.store.connection.execute(
+            "SELECT kind FROM events WHERE run_id='run-1' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        self.assertEqual(event["kind"], "run.deleted")
+
     def test_run_detail_endpoints(self) -> None:
         self.store.create_task("run-1", "task-1", cwd=str(self.project))
         self.store.transition_task("task-1", TaskState.READY, reason="test")
@@ -142,6 +171,57 @@ class ConsoleServerTests(unittest.TestCase):
         task = next(item for item in payload["chat"]["tasks"] if item["task_id"] == "task-chat")
         self.assertEqual(task["messages"][0]["role"], "user")
         self.assertEqual(task["messages"][0]["text"], "Summarize this task")
+
+    def test_chat_tree_includes_all_bound_team_agents_even_when_idle(self) -> None:
+        supervisor = self.store.provision_fake_pool_agent(
+            run_id="run-1", pool_id="codex-supervisor", backend="codex",
+            model="gpt-test", role_id="supervisor",
+        )
+        worker_one = self.store.provision_fake_pool_agent(
+            run_id="run-1", pool_id="codebuddy-workers", backend="codebuddy",
+            model="worker-a", role_id="worker",
+        )
+        worker_two = self.store.provision_fake_pool_agent(
+            run_id="run-1", pool_id="codebuddy-workers", backend="codebuddy",
+            model="worker-b", role_id="worker",
+        )
+        status, payload = _request(self.port, "/api/runs/run-1/chat")
+        self.assertEqual(status, 200, payload)
+        chat = payload["chat"]
+        by_role = {item["role_id"]: item for item in chat["roles"]}
+        self.assertEqual(len(by_role["worker"]["agents"]), 2)
+        self.assertEqual(by_role["supervisor"]["agents"][0]["agent_id"], supervisor["agent_id"])
+        self.assertEqual(
+            {item["agent_id"] for item in by_role["worker"]["agents"]},
+            {worker_one["agent_id"], worker_two["agent_id"]},
+        )
+        self.assertEqual(
+            {item["agent_id"] for item in chat["agents"]},
+            {supervisor["agent_id"], worker_one["agent_id"], worker_two["agent_id"]},
+        )
+
+    def test_chat_renders_supervisor_plan_as_natural_language(self) -> None:
+        text = _human_result_text(
+            {
+                "text": json.dumps(
+                    {
+                        "plan_version": 2,
+                        "supervisor_response": "我会协调两个 Worker。",
+                        "tasks": [
+                            {"task_id": "worker-1", "role_id": "worker", "instruction": "介绍自己"},
+                            {"task_id": "worker-2", "role_id": "worker", "instruction": "介绍自己"},
+                        ],
+                    },
+                    ensure_ascii=False,
+                )
+            },
+            {},
+            role_id="supervisor",
+        )
+        self.assertIn("主管已完成规划", text)
+        self.assertIn("worker-1", text)
+        self.assertNotIn("plan_version", text)
+        self.assertNotIn('"tasks"', text)
 
     def test_console_can_delete_task_and_keep_audit_event(self) -> None:
         self.store.create_task("run-1", "task-delete", cwd=str(self.project))
@@ -366,6 +446,17 @@ class ConsoleServerTests(unittest.TestCase):
         )
         self.assertNotIn('id="probeCodeBuddyModels"', html)
         self.assertIn("选择 CodeBuddy 后自动测试", html)
+
+    def test_console_html_uses_team_first_task_defaults_and_stable_run_details(self) -> None:
+        html = Path("orchestrator/console/static/index.html").read_text(encoding="utf-8")
+        self.assertIn('data-delete-run=', html)
+        self.assertIn('"收起"', html)
+        self.assertIn("团队配置自动选择（推荐）", html)
+        self.assertIn("交给团队主管（推荐）", html)
+        self.assertIn("默认按当前 Run 团队", html)
+        self.assertIn('name="approval_mode"', html)
+        self.assertIn("自动协作（推荐）", html)
+        self.assertIn("display_instruction", html)
 
     def test_console_can_save_custom_model_provider_without_secret(self) -> None:
         status, payload = _request(

@@ -370,3 +370,15 @@ R8 建立了固定的证据契约和只读验收门禁，并已在可用账号�
 ### 4. 未完成与下一步
 
 R8 A–J 真实出口已完成。后续只保留产品增强项（例如 CodeBuddy 活动 turn 的即时 steer、跨 workspace 热切换和更长时间稳定性），不得把这些可选增强倒写成当前 R8 的缺陷。
+
+## 产品增强：团队优先任务入口与对话工作台（2026-09-12）
+
+状态：**已完成（控制台行为切片；不改变 R8 既有验收口径）。**
+
+- 新建 Run 默认采用“自动协作”（仍可切换为生成后人工批准）；发起任务默认使用当前 Run 的团队配置：用户输入一句自然语言后先交给 Supervisor，由 Supervisor 按池配置派发 Worker；后端、提供方和模型保留在“高级覆盖”中，不再要求用户重复选择。
+- 主管计划校验兼容部分模型返回的 `supervisor_response` 字段，并在同一计划的 Worker 全部结束后自动创建 Supervisor 自然语言汇总任务，避免用户手工拼接结果。
+- Agent 对话将内部 JSON 计划转换为可读文本，项目树会列出所有活动角色绑定（含尚未执行的 Worker），每个 Agent 可独立筛选任务和调用上下文。
+- Run 列表新增删除与收起：删除必须先停止 serve，并只删除 `.agent-hub/worktrees/<run-id>`、`.agent-hub/runs/<run-id>` 等受管目录；主项目目录不删除，数据库保留 `run.deleted` 审计事件。列表轮询改为 keyed DOM 更新，展开的详情不会因刷新闪回。
+- `test004` 原失败原因已记录并修复：模型把计划摘要返回为 `supervisor_response`、把 Worker 指令返回为 `instruction`，而严格契约使用 `summary`/`prompt`；入口只做这两个无损别名规范化，随后仍执行相同的字段、角色、后端、scope 校验。
+
+验证：`.venv\\Scripts\\python.exe -m unittest discover -s tests`，357 项，356 通过、1 跳过；静态页 Node 语法检查通过，`git diff --check` 通过。

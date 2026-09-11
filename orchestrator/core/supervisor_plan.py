@@ -135,27 +135,45 @@ def validate_supervisor_plan(
     """
     if not isinstance(payload, Mapping):
         raise PlanValidationError("plan must be a JSON object")
-    unknown = set(payload) - _PLAN_FIELDS
+    # Some model families use a natural-language field name for the plan
+    # synopsis.  Treat it as the public alias of ``summary`` before applying
+    # the strict contract; the normalized plan still stores only ``summary``.
+    normalized_payload = dict(payload)
+    if "summary" not in normalized_payload and "supervisor_response" in normalized_payload:
+        normalized_payload["summary"] = normalized_payload.pop("supervisor_response")
+    raw_tasks = normalized_payload.get("tasks")
+    if isinstance(raw_tasks, Sequence) and not isinstance(raw_tasks, (str, bytes)):
+        normalized_tasks: list[Any] = []
+        for raw_task in raw_tasks:
+            if isinstance(raw_task, Mapping):
+                normalized_task = dict(raw_task)
+                if "prompt" not in normalized_task and "instruction" in normalized_task:
+                    normalized_task["prompt"] = normalized_task.pop("instruction")
+                normalized_tasks.append(normalized_task)
+            else:
+                normalized_tasks.append(raw_task)
+        normalized_payload["tasks"] = normalized_tasks
+    unknown = set(normalized_payload) - _PLAN_FIELDS
     if unknown:
         raise PlanValidationError(f"unknown plan fields: {sorted(unknown)}")
-    missing = {"plan_version", "summary", "tasks"} - set(payload)
+    missing = {"plan_version", "summary", "tasks"} - set(normalized_payload)
     if missing:
         raise PlanValidationError(f"missing plan fields: {sorted(missing)}")
 
-    version = payload["plan_version"]
+    version = normalized_payload["plan_version"]
     if isinstance(version, bool) or not isinstance(version, int):
         raise PlanValidationError("plan_version must be an integer")
     if version not in SUPPORTED_PLAN_VERSIONS:
         raise PlanValidationError(f"unsupported plan_version: {version}")
     if version >= 2:
-        required_v2 = {"revision", "worker_concurrency", "task_cap"} - set(payload)
+        required_v2 = {"revision", "worker_concurrency", "task_cap"} - set(normalized_payload)
         if required_v2:
             raise PlanValidationError(f"missing plan fields: {sorted(required_v2)}")
-    revision = _positive_int(payload.get("revision", 1), "revision")
+    revision = _positive_int(normalized_payload.get("revision", 1), "revision")
     worker_concurrency = _positive_int(
-        payload.get("worker_concurrency", 1), "worker_concurrency"
+        normalized_payload.get("worker_concurrency", 1), "worker_concurrency"
     )
-    task_cap = _positive_int(payload.get("task_cap", max_tasks), "task_cap")
+    task_cap = _positive_int(normalized_payload.get("task_cap", max_tasks), "task_cap")
     if task_cap > max_tasks:
         raise PlanValidationError(f"task_cap exceeds maximum allowed count: {task_cap} > {max_tasks}")
     if max_worker_concurrency is not None and worker_concurrency > max_worker_concurrency:
@@ -164,12 +182,12 @@ def validate_supervisor_plan(
         )
     if worker_concurrency > task_cap:
         raise PlanValidationError("worker_concurrency cannot exceed task_cap")
-    summary = _text(payload["summary"], "summary")
+    summary = _text(normalized_payload["summary"], "summary")
     _reject_sensitive(summary, "summary")
 
     if max_tasks < 1:
         raise ValueError("max_tasks must be at least 1")
-    raw_tasks = payload["tasks"]
+    raw_tasks = normalized_payload["tasks"]
     if not isinstance(raw_tasks, Sequence) or isinstance(raw_tasks, (str, bytes)):
         raise PlanValidationError("tasks must be a JSON array")
     if not raw_tasks:
@@ -334,8 +352,8 @@ def validate_supervisor_plan(
         revision=revision,
         worker_concurrency=worker_concurrency,
         task_cap=task_cap,
-        permissions=_json_safe(payload.get("permissions"), "permissions"),
-        budget=_json_safe(payload.get("budget"), "budget"),
+        permissions=_json_safe(normalized_payload.get("permissions"), "permissions"),
+        budget=_json_safe(normalized_payload.get("budget"), "budget"),
     )
     canonical = json.dumps(
         normalized.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")

@@ -4,7 +4,7 @@
 
 登录状态补充核验：同一项目 venv/SDK 在沙箱内无法读取 CodeBuddy 用户级认证目录，正常 Windows 用户权限下 marker=True、SDK=True。此前控制台继承沙箱限制会把“无权读取”误判成“未登录”；现已改为返回 `login_probe=unreadable` 和明确提示。已通过批准在正常权限启动 8091 控制台，真实 `/api/connections` 返回 CodeBuddy `logged_in=true`。另外，模型健康检查与真实任务都会直接发 CodeBuddy 请求：`.agent-hub/model-health.json` 最近一次记录 7 个内置模型成功，`test003` 已返回 CodeBuddy 文本并完成。因此“模型请求成功”是比认证文件探测更强的可用性证据。
 
-最新测试结果：350 项，349 通过、1 跳过（R8 门禁/真实证据转换回归及 R7/R6/R5 与既有测试）；以下旧切片测试数字为历史记录。
+最新测试结果：357 项，356 通过、1 跳过（R8 门禁/真实证据转换回归及 R7/R6/R5 与既有测试）；以下旧切片测试数字为历史记录。
 
 最新授权修复：CodeBuddy 网页入口改为内存中的 starting / waiting / completed / failed 状态；授权链接交给前端打开并提供可点击回退入口，终态清除链接，不写入日志。8090 实测接口进入 waiting；人工登录回调尚待验收。此前仅凭进程存活宣称授权页已打开的结论不成立。
 
@@ -54,6 +54,9 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 - CodeBuddy 模型选择已按来源分组：提供方下拉框将“内置模型（CodeBuddy 默认）”与“自定义模型提供方”隔开，模型下拉框显示“内置模型”或“自定义模型 · 具体提供方”，火山 CodingPlan 不再与内置模型混淆。
 - 团队编辑器会在新增/删除 Agent 池前同步当前表单，保留已填写的角色、池标识、数量、提供方和模型；CodeBuddy 连通性结果按提供方缓存，编辑器重绘不会重复触发查询。
 - Run 启动服务时按 Run 保存的 team_id 自动解析 .agent-hub/teams/<team_id>.json 或默认团队文件，不再弹出并默认使用 config/team.yaml；旧的 default Run 仍兼容回退到默认团队。
+- 控制台团队优先任务入口已补齐：新建 Run 默认使用“自动协作”，发起任务默认把自然语言交给 Run 绑定的 Supervisor，后端/提供方/模型只作为高级临时覆盖；主管计划失败兼容模型常见的 `supervisor_response`/`instruction` 别名，并在全部 Worker 完成后自动创建自然语言汇总任务。
+- Run 列表支持受保护的删除和详情收起：删除前要求停止 serve，只清理该 Run 的受管 worktree/运行目录并保留审计事件；列表轮询采用 keyed DOM 更新，不再整块重建导致详情闪烁。
+- Agent 对话现在隐藏内部计划 JSON，按项目→角色→Agent 显示全部绑定实例（包括尚未执行的 CodeBuddy Worker），并为每个 Agent 保留任务过滤上下文。
 - 控制台审核/对话切片已接通：serve 持有 `serve-*` controller 时，人工审核和删除复用当前 controller/authority fencing token，不再因“run controller is held by another owner”失败；暂停/恢复/取消仍保持单写者保护。
 - 任务列表补充任务说明、尝试次数、独立“对话/删除”按钮；删除只允许非运行任务，删除前清理 FK 子记录并保留 `task.deleted` 审计事件。
 - 新增 `GET /api/runs/{run_id}/chat` 与“Agent 对话”页，按 Run→任务隔离显示任务提示、协议消息和每个 Agent backend call 的状态/输出，运行中按 2.5 秒轮询刷新。
@@ -213,3 +216,4 @@ SPIKE_REPORT.md 和 STAGE1_REPORT.md 为只读历史签字。旧的 Stage 2 comp
 - 签字提交 `stage3: complete Beta`（2026-09-06，tag `stage3-beta-complete`）：README 自用说明 + 本台账落档。阶段 0/1/2/3 全部 PASS，可自用。
 - （2026-09-10）控制台写任务闭环 UI 提交：write_scope 表单、worktree 自动准备、REVIEW 通过/打回按钮 + 进度台账数据校准（261 测试、schema v13）。
 - （2026-09-11）修复 CodeBuddy 一键登录运行时：启动器优先复用项目 `.venv`，后台授权即使控制台由备用 Python 启动也切换到项目 `.venv`；新增回归测试验证 SDK 运行时选择和子进程秒退提示；控制台不再要求输入 `/login`；补齐 serve 子进程源码路径传递；全量 301/301 通过。
+- （2026-09-12）完成团队优先任务入口（新 Run 默认自动协作）、主管自动汇总、Run 删除/收起与详情防闪、自然语言 Agent 对话和完整 Agent 树，并兼容 `supervisor_response`/`instruction` 计划字段；全量 357 项（356 通过、1 跳过）。

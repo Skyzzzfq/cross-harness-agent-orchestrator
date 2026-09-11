@@ -93,6 +93,7 @@ button{font-family:inherit;cursor:pointer}
 .btn.ghost{background:transparent;color:var(--text-2);border:1px solid var(--line);box-shadow:none}
 .btn.ghost:hover{color:var(--text);border-color:#334155;background:rgba(255,255,255,.03)}
 .btn.danger{background:linear-gradient(180deg,#dc4c4c,#b93636);box-shadow:0 2px 8px rgba(248,113,113,.2)}
+.danger-text{color:#ff9a9a!important}
 .btn.sm{padding:3px 10px;font-size:12px;border-radius:6px}
 .btn.wide{width:100%;justify-content:center}
 .icon-btn{border:0;background:transparent;color:var(--text-3);cursor:pointer;padding:4px;border-radius:6px}
@@ -249,6 +250,7 @@ button:focus-visible,.field input:focus-visible,.field select:focus-visible,.fie
       <form class="form-row" id="newRunForm">
         <div class="field"><label>Run 标识（留空自动生成）</label><input name="run_id" placeholder="run-my-project" style="min-width:240px"></div>
         <div class="field"><label>团队（team）</label><select name="team_id" style="min-width:200px"></select></div>
+        <div class="field"><label>主管计划</label><select name="approval_mode" style="min-width:190px"><option value="auto">自动协作（推荐）</option><option value="manual">生成后人工批准</option></select></div>
         <button class="btn" type="submit" style="margin-left:auto">创建 Run</button>
       </form>
     </div>
@@ -357,12 +359,17 @@ button:focus-visible,.field input:focus-visible,.field select:focus-visible,.fie
     <div class="dialog-b">
       <div class="field" style="margin-bottom:12px"><label>任务说明</label><textarea id="taskPrompt" rows="4" required placeholder="告诉 Agent 要完成什么"></textarea></div>
       <div class="grid-2">
-        <div class="field"><label>任务类型</label><select id="taskModeSelect"><option value="read_only">普通只读</option><option value="write">写任务</option><option value="supervisor">主管规划</option></select></div>
-        <div class="field"><label>执行后端</label><select id="taskBackendSelect"></select></div>
-        <div class="field"><label>提供方</label><select id="taskProviderSelect"><option value="">内置 / 团队默认</option></select></div>
-        <div class="field"><label>模型</label><select id="taskModelSelect"><option value="">使用团队池默认</option></select></div>
+        <div class="field"><label>任务类型</label><select id="taskModeSelect"><option value="supervisor">交给团队主管（推荐）</option><option value="read_only">直接执行 Worker（只读）</option><option value="write">直接执行 Worker（写入）</option></select></div>
       </div>
-      <div class="form-row" style="margin-top:10px"><span id="taskModelStatus" class="muted">选择后端后加载可用模型</span></div>
+      <details id="taskAdvancedBox" style="margin-top:12px">
+        <summary class="muted" style="cursor:pointer">高级覆盖（通常不需要，默认使用当前 Run 团队配置）</summary>
+        <div class="grid-2" style="margin-top:10px">
+          <div class="field"><label>临时指定执行后端</label><select id="taskBackendSelect"></select></div>
+          <div class="field"><label>临时指定提供方</label><select id="taskProviderSelect"><option value="">内置 / 团队默认</option></select></div>
+          <div class="field"><label>临时指定模型</label><select id="taskModelSelect"><option value="">使用团队池默认</option></select></div>
+        </div>
+        <div class="form-row" style="margin-top:10px"><span id="taskModelStatus" class="muted">默认按当前 Run 团队：先交给 Supervisor，再由团队池分配 Worker。</span></div>
+      </details>
       <div class="field" id="taskCustomModelBox" style="display:none;margin-top:12px"><label>自定义模型 ID</label><input id="taskCustomModel" placeholder="输入未列在目录中的模型 ID"></div>
       <div id="taskWriteBox" style="display:none;margin-top:12px">
         <div class="field"><label>write_scope（受管 worktree 内相对路径，逗号分隔）</label><input id="taskWriteScope" placeholder="src/a.py,tests/test_a.py"></div>
@@ -521,42 +528,59 @@ async function loadRuns(){
   $("#stTasks").textContent=tasks;$("#stDone").textContent=done;
   const box=$("#runList");
   if(!runs.length){box.innerHTML=`<div class="card"><div class="empty">还没有 Run —— 在上方创建第一个 Run</div></div>`;return;}
-  const keepOpen=expandedRun||currentRun;
-  box.innerHTML="";
+  const existing=new Map([...box.querySelectorAll(".run-card[data-run-card]")].map(card=>[card.dataset.runCard,card]));
+  const seen=new Set();
   for(const run of runs){
     const totalN=run.tasks_total||0,doneN=run.tasks_completed||0;
     const pct=totalN?Math.round(doneN/totalN*100):0;
-    const div=document.createElement("div");div.className="run-card";
-    div.innerHTML=`
-      <div class="run-bar"><div class="fill" style="width:${pct}%"></div></div>
-      <div class="run-head">
-        <span class="run-id">${mono(run.run_id)}</span>
-        ${run.running?'<span class="pill ok pulse">serve 运行中</span>':'<span class="pill gray">serve 未启动</span>'}
-        <span class="run-meta">团队：${esc(run.team_id)} · 创建 ${esc((run.created_at||"").slice(0,19).replace("T"," "))} · 任务 ${doneN}/${totalN}</span>
-        <span class="run-actions">
-          ${run.running
-            ?`<button class="btn danger sm" data-stop="${esc(run.run_id)}">停止 serve</button>`
-            :`<button class="ghost btn sm" data-start="${esc(run.run_id)}">启动 serve</button>`}
-          <button class="ghost btn sm" data-open="${esc(run.run_id)}">详情</button>
-        </span>
-      </div>
-      <div class="run-detail" style="display:none" data-detail="${esc(run.run_id)}"></div>`;
-    const btnOpen=div.querySelector("[data-open]");
-    if(btnOpen)btnOpen.onclick=()=>openRun(run.run_id,div);
-    const btnStart=div.querySelector("[data-start]");
-    if(btnStart)btnStart.onclick=()=>startServe(run.run_id);
-    const btnStop=div.querySelector("[data-stop]");
-    if(btnStop)btnStop.onclick=()=>stopServe(run.run_id);
-    box.appendChild(div);
-    if(keepOpen===run.run_id){
-      const detail=div.querySelector(".run-detail");
-      if(detail)detail.style.display="block";
+    const runId=String(run.run_id),div=existing.get(runId)||document.createElement("div");
+    seen.add(runId);div.className="run-card";div.dataset.runCard=runId;
+    let detail=div.querySelector(".run-detail[data-detail]");
+    if(!detail){
+      div.innerHTML=`<div class="run-bar"><div class="fill"></div></div><div class="run-head"></div><div class="run-detail" style="display:none" data-detail="${esc(runId)}"></div>`;
+      detail=div.querySelector(".run-detail");
     }
+    const wasOpen=expandedRun===runId;
+    const head=div.querySelector(".run-head");
+    head.innerHTML=`
+      <span class="run-id">${mono(runId)}</span>
+      ${run.running?'<span class="pill ok pulse">serve 运行中</span>':'<span class="pill gray">serve 未启动</span>'}
+      <span class="run-meta">团队：${esc(run.team_id)} · 创建 ${esc((run.created_at||"").slice(0,19).replace("T"," "))} · 任务 ${doneN}/${totalN}</span>
+      <span class="run-actions">
+        ${run.running
+          ?`<button class="btn danger sm" data-stop="${esc(runId)}">停止 serve</button>`
+          :`<button class="ghost btn sm" data-start="${esc(runId)}">启动 serve</button>`}
+        <button class="ghost btn sm" data-open="${esc(runId)}" aria-expanded="${wasOpen?"true":"false"}">${wasOpen?"收起":"详情"}</button>
+        <button class="ghost btn sm danger-text" data-delete-run="${esc(runId)}">删除 Run</button>
+      </span>`;
+    const fill=div.querySelector(".run-bar .fill");if(fill)fill.style.width=`${pct}%`;
+    detail.dataset.detail=runId;detail.style.display=wasOpen?"block":"none";
+    const btnOpen=div.querySelector("[data-open]");
+    if(btnOpen)btnOpen.onclick=()=>openRun(runId,div);
+    const btnStart=div.querySelector("[data-start]");
+    if(btnStart)btnStart.onclick=()=>startServe(runId);
+    const btnStop=div.querySelector("[data-stop]");
+    if(btnStop)btnStop.onclick=()=>stopServe(runId);
+    const btnDelete=div.querySelector("[data-delete-run]");
+    if(btnDelete)btnDelete.onclick=()=>deleteRun(runId);
+    box.appendChild(div);
   }
-  if(keepOpen){
-    const card=[...box.querySelectorAll(".run-card")].find(x=>x.querySelector(".run-detail")?.dataset.detail===keepOpen);
-    if(card){expandedRun=keepOpen;loadDetail(keepOpen);}
-  }
+  [...existing.values()].filter(card=>!seen.has(card.dataset.runCard)).forEach(card=>card.remove());
+  syncRunDetailButtons();
+  if(expandedRun&&seen.has(expandedRun))loadDetail(expandedRun);
+}
+function syncRunDetailButtons(){
+  $$('[data-open]').forEach(button=>{
+    const open=button.dataset.open===expandedRun;
+    button.textContent=open?"收起":"详情";button.setAttribute("aria-expanded",open?"true":"false");
+  });
+}
+async function deleteRun(runId){
+  if(!confirm(`删除 Run ${runId}？\n\n这会删除该 Run 的受管 worktree 和运行目录，并从列表移除；项目主目录不会删除。此操作不可撤销。`))return;
+  const r=await api(`/api/runs/${encodeURIComponent(runId)}`,{method:"DELETE",headers:{"Content-Type":"application/json"},body:JSON.stringify({reason:"console-delete"})});
+  if(r.status!==200){toast(r.body?.error||"删除 Run 失败","err");return;}
+  if(expandedRun===runId)expandedRun="";if(currentRun===runId)currentRun="";
+  toast("Run 已删除，受管目录已清理","ok");loadRuns();
 }
 $("#toggleNewRun").onclick=()=>{$("#newRunBox").style.display=$("#newRunBox").style.display==="none"?"block":"none";};
 $("#newRunForm").addEventListener("submit",async e=>{e.preventDefault();
@@ -577,11 +601,17 @@ async function stopServe(runId){
   toast(runId+" serve 已停止");loadRuns();}
 
 async function openRun(runId,cardEl,scroll=true){
+  if(expandedRun===runId){
+    const current=cardEl?.querySelector(".run-detail[data-detail]");
+    if(current)current.style.display="none";
+    expandedRun="";currentRun="";syncRunDetailButtons();return;
+  }
   currentRun=runId;
   expandedRun=runId;
   if(cardEl)$$(".run-detail").forEach(d=>d.style.display="none");
   const detail=cardEl?cardEl.querySelector(".run-detail"):null;
   if(detail){detail.style.display="block";if(scroll)detail.scrollIntoView({behavior:"smooth",block:"nearest"});}
+  syncRunDetailButtons();
   await Promise.all([loadSummary(runId),loadDetail(runId)]);
 }
 async function loadSummary(runId){
@@ -615,7 +645,7 @@ async function loadDetail(runId){
       <h4>任务</h4><div style="overflow-x:auto"><table>
       <thead><tr><th>任务</th><th>角色 / 后端 / 模型</th><th>状态</th><th>模式</th><th>范围</th><th>尝试</th><th>审核</th><th>操作</th></tr></thead>
       <tbody>${
-        (tasks.body.tasks||[]).map(t=>`<tr><td><div class="mono">${esc(t.task_id)}</div><div class="muted" title="${esc(t.instruction_text||"")}" style="max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.instruction_text||"无任务说明")}</div></td>
+        (tasks.body.tasks||[]).map(t=>{const instruction=t.display_instruction||t.instruction_text||"无任务说明";return `<tr><td><div class="mono">${esc(t.task_id)}</div><div class="muted" title="${esc(instruction)}" style="max-width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(instruction)}</div></td>
           <td>${esc(t.required_role_id||"")} ${t.required_backend?`· ${esc(t.required_backend)}`:""}${t.required_provider_id?` · ${esc(t.required_provider_id)}`:""}${t.required_model?` · ${esc(t.required_model)}`:""}</td>
           <td>${pill(t.state)}</td><td>${esc(t.access_mode)}</td>
           <td class="muted">${esc((t.write_scope_json||"").slice(0,40))}</td>
@@ -624,7 +654,7 @@ async function loadDetail(runId){
             ?`<span style="display:inline-flex;gap:6px"><button class="btn sm" data-review="${esc(t.task_id)}" data-dec="approve">通过</button>
               <button class="ghost btn sm" data-review="${esc(t.task_id)}" data-dec="rework">打回</button></span>`
             :""}</td>
-          <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><button class="ghost btn sm" data-chat-task="${esc(t.task_id)}">对话</button>${["ACTIVE","INTEGRATION","CANCEL_REQUESTED"].includes(t.state)?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:`<button class="ghost btn sm" data-delete="${esc(t.task_id)}">删除</button>`}</span></td></tr>`).join("")||`<tr><td colspan="8" class="empty">暂无任务</td></tr>`
+          <td><span style="display:inline-flex;gap:6px;flex-wrap:wrap"><button class="ghost btn sm" data-chat-task="${esc(t.task_id)}">对话</button>${["ACTIVE","INTEGRATION","CANCEL_REQUESTED"].includes(t.state)?`<button class="ghost btn sm" data-cancel="${esc(t.task_id)}">取消</button>`:`<button class="ghost btn sm" data-delete="${esc(t.task_id)}">删除</button>`}</span></td></tr>`;}).join("")||`<tr><td colspan="8" class="empty">暂无任务</td></tr>`
       }</tbody></table></div>
     </div>
     <div class="detail-section"><h4>主管计划</h4>
@@ -685,13 +715,19 @@ async function newTaskForm(runId){
   const mode=$("#taskModeSelect"),status=$("#taskModelStatus");
   const modelInfo=await api(`/api/runs/${runId}/models`);
   const teamModels=modelInfo.body?.models||[];
-  backend.innerHTML='<option value="">由调度器选择</option><option value="codex">OpenAI Codex</option><option value="codebuddy">WorkBuddy / CodeBuddy</option><option value="fake">Fake（离线）</option>';
+  backend.innerHTML='<option value="">团队配置自动选择（推荐）</option><option value="codex">OpenAI Codex</option><option value="codebuddy">WorkBuddy / CodeBuddy</option><option value="fake">Fake（离线）</option>';
   provider.innerHTML=providerOptionsHTML("",backend.value);
-  mode.value="read_only";$("#taskPrompt").value="";$("#taskCustomModelBox").style.display="none";
+  mode.value="supervisor";$("#taskPrompt").value="";$("#taskCustomModelBox").style.display="none";
   $("#taskWriteBox").style.display="none";$("#taskCustomModel").value="";$("#taskWriteScope").value="";
 
   async function refresh(force=false){
-    const selectedBackend=backend.value||"fake";
+    const selectedBackend=backend.value;
+    if(!selectedBackend){
+      model.innerHTML='<option value="">使用团队池默认</option>';
+      status.textContent="默认按当前 Run 团队：先交给 Supervisor，再由团队池分配 Worker。";
+      $("#taskCustomModelBox").style.display="none";
+      return;
+    }
     const selectedProvider=selectedBackend==="codebuddy"?provider.value:"";
     const previous=model.value;
     status.textContent="正在加载模型目录…";
@@ -712,7 +748,6 @@ async function newTaskForm(runId){
   }
   function updateMode(){
     $("#taskWriteBox").style.display=mode.value==="write"?"block":"none";
-    if(mode.value==="supervisor")backend.value="codex";
     provider.innerHTML=providerOptionsHTML("",backend.value);
     provider.disabled=backend.value!=="codebuddy";
     refresh();
@@ -741,15 +776,13 @@ async function newTaskForm(runId){
       if(selectedBackend)body.required_backend=selectedBackend;
       if(selectedModel)body.required_model=selectedModel;
       if(selectedBackend==="codebuddy"&&provider.value)body.required_provider_id=provider.value;
-      if(selectedMode==="supervisor"||selectedMode==="write"){
+      if(selectedMode==="write"){
         const wt=await api(`/api/runs/${runId}/worktree`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
         if(wt.status!==200){toast((wt.body&&wt.body.error)||"准备受管 worktree 失败","err");return;}
         body.cwd=wt.body.worktree;
-        if(selectedMode==="write"){
-          const scope=$("#taskWriteScope").value.split(",").map(s=>s.trim()).filter(Boolean);
-          if(!scope.length){toast("write_scope 不能为空","err");return;}
-          body.write_scope=scope;
-        }
+        const scope=$("#taskWriteScope").value.split(",").map(s=>s.trim()).filter(Boolean);
+        if(!scope.length){toast("write_scope 不能为空","err");return;}
+        body.write_scope=scope;
       }
       const r=await api(`/api/runs/${runId}/tasks`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       if(r.status!==200){toast(r.body.error||"发起失败","err");return;}
@@ -810,11 +843,11 @@ async function loadChat(runId,taskId=""){
 function renderChatTree(chat,runId,taskId){
   const box=$("#chatProjectTree"),project=chat.project||{},roles=chat.roles||[];
   const roleMap={};
-  roles.forEach(role=>{roleMap[role.role_id]={...role,agents:[]};});
+  roles.forEach(role=>{roleMap[role.role_id]={...role,agents:[...(role.agents||[])]};});
   (chat.agents||[]).forEach(agent=>{
     const roleId=agent.role_id||"unassigned";
     if(!roleMap[roleId])roleMap[roleId]={role_id:roleId,title:roleId,agents:[]};
-    roleMap[roleId].agents.push(agent);
+    if(!roleMap[roleId].agents.some(item=>item.agent_id===agent.agent_id))roleMap[roleId].agents.push(agent);
   });
   const roleNodes=Object.values(roleMap).map(role=>`<div class="chat-tree-role"><div class="chat-tree-label">${esc(role.title||role.role_id)}</div>${(role.agents||[]).map(agent=>`<button class="chat-agent-link${chatAgent===agent.agent_id?" active":""}" data-chat-agent="${esc(agent.agent_id)}">${esc(agent.agent_id)}<span class="muted">${esc(agent.backend||"")}</span></button>`).join("")||'<div class="muted" style="padding:4px 8px">暂无实例</div>'}</div>`).join("");
   box.innerHTML=`<div class="chat-tree-project"><b>${esc(project.name||"当前项目")}</b><span class="muted">${esc(project.workspace||"")}</span><small>团队：${esc(project.team_id||"")}</small></div>${roleNodes||'<div class="empty">暂无角色/Agent</div>'}`;

@@ -86,6 +86,15 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at TEXT NOT NULL
 );
 
+-- A deleted Run is hidden from the product list while its audit rows remain
+-- available for diagnostics.  The local Run workspaces are removed by the
+-- console only after the user explicitly confirms the destructive action.
+CREATE TABLE IF NOT EXISTS deleted_runs (
+    run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+    deleted_at TEXT NOT NULL,
+    reason TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(run_id),
@@ -224,6 +233,59 @@ class SQLiteStateStore:
                 (run_id, team_id, now, snapshot_json, snapshot_digest, approval_mode),
             )
             self._append_event(run_id, None, None, "run.created", None, None, {})
+
+    def mark_run_deleted(self, run_id: str, *, reason: str = "console-delete") -> dict[str, str]:
+        """Hide a Run from the console while retaining its audit history.
+
+        The caller is responsible for stopping any serve process and removing
+        the exact managed workspace paths after the user confirms.  Active
+        tasks are rejected here as a final database-side safety fence.
+        """
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            run = self.connection.execute(
+                "SELECT run_id FROM runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            existing = self.connection.execute(
+                "SELECT deleted_at FROM deleted_runs WHERE run_id=?", (run_id,)
+            ).fetchone()
+            if existing is not None:
+                self.connection.commit()
+                return {"run_id": run_id, "deleted_at": str(existing["deleted_at"])}
+            active = self.connection.execute(
+                """
+                SELECT task_id, state FROM tasks
+                WHERE run_id=? AND state IN ('ACTIVE','INTEGRATION','CANCEL_REQUESTED')
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+            if active is not None:
+                raise ValueError(
+                    f"Run {run_id} still has active task {active['task_id']} "
+                    f"({active['state']}); stop or cancel it first"
+                )
+            deleted_at = utc_now()
+            self.connection.execute(
+                "INSERT INTO deleted_runs(run_id, deleted_at, reason) VALUES (?, ?, ?)",
+                (run_id, deleted_at, str(reason or "console-delete")[:200]),
+            )
+            self._append_event(
+                run_id, None, None, "run.deleted", None, None,
+                {"reason": str(reason or "console-delete")[:200]},
+            )
+            self.connection.commit()
+            return {"run_id": run_id, "deleted_at": deleted_at}
+        except BaseException:
+            self.connection.rollback()
+            raise
+
+    def is_run_deleted(self, run_id: str) -> bool:
+        return self.connection.execute(
+            "SELECT 1 FROM deleted_runs WHERE run_id=?", (run_id,)
+        ).fetchone() is not None
 
     def run_approval_mode(self, run_id: str) -> str:
         row = self.connection.execute(
@@ -8071,6 +8133,7 @@ class SQLiteStateStore:
         row = self.connection.execute(
             """
             SELECT run_id FROM runs WHERE team_id = ?
+              AND NOT EXISTS (SELECT 1 FROM deleted_runs d WHERE d.run_id = runs.run_id)
             ORDER BY created_at DESC, rowid DESC LIMIT 1
             """,
             (team_id,),

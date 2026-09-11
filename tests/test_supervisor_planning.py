@@ -64,6 +64,44 @@ class SupervisorPlanValidationTests(unittest.TestCase):
         self.assertEqual([task.task_id for task in plan.tasks], ["worker-a", "worker-b"])
         self.assertTrue(plan.digest)
 
+    def test_supervisor_response_alias_is_normalized_to_summary(self) -> None:
+        payload = _valid_plan()
+        payload["supervisor_response"] = payload.pop("summary")
+        plan = self._validate(payload)
+        self.assertEqual(plan.summary, "Split the work into two independent changes.")
+
+    def test_v2_model_aliases_are_normalized_without_relaxing_validation(self) -> None:
+        payload = {
+            "plan_version": 2,
+            "revision": 1,
+            "task_cap": 1,
+            "worker_concurrency": 1,
+            "supervisor_response": "安排一个回答任务。",
+            "tasks": [{
+                "task_id": "worker-response",
+                "role_id": "worker",
+                "backend": "fake",
+                "instruction": "请用一句话介绍自己。",
+                "access_mode": "read_only",
+                "write_scope": [],
+                "depends_on": [],
+                "acceptance_criteria": ["一句话"],
+                "input_refs": [],
+                "task_kind": "response",
+                "output_contract": {"type": "text"},
+            }],
+        }
+        plan = validate_supervisor_plan(
+            payload,
+            allowed_role_ids={"worker", "supervisor"},
+            allowed_backends={"fake", "codex"},
+            max_tasks=2,
+            existing_task_ids=set(),
+            max_worker_concurrency=1,
+        )
+        self.assertEqual(plan.summary, "安排一个回答任务。")
+        self.assertEqual(plan.tasks[0].prompt, "请用一句话介绍自己。")
+
     def test_invalid_json_shape_is_rejected(self) -> None:
         with self.assertRaises(PlanValidationError):
             self._validate("not-json-object")
@@ -299,6 +337,48 @@ class SupervisorPlanMaterializationTests(unittest.IsolatedAsyncioTestCase):
             """
         ).fetchone()[0]
         self.assertEqual(started, 2)
+
+    async def test_completed_workers_create_one_natural_language_summary_task(self) -> None:
+        await self._run_supervisor(structured=_valid_plan())
+        materialize_ready_supervisor_plans(
+            self.store,
+            run_id="run-1",
+            team_spec=self.team,
+            controller=self.controller,
+            authority=self.authority,
+            worker_cwd=str(self.root),
+        )
+        adapter = FakeBackendAdapter(
+            default_behavior=FakeBehavior(delay_seconds=0.01, text="Worker 已完成自我介绍。")
+        )
+        await scheduler_tick(
+            self.store,
+            run_id="run-1",
+            adapters={"fake": adapter},
+            authority=self.authority,
+            controller=self.controller,
+        )
+        materialize_ready_supervisor_plans(
+            self.store,
+            run_id="run-1",
+            team_spec=self.team,
+            controller=self.controller,
+            authority=self.authority,
+            worker_cwd=str(self.root),
+        )
+        summary = self.store.connection.execute(
+            "SELECT task_id, state, task_kind, parent_task_id FROM tasks "
+            "WHERE run_id='run-1' AND task_kind='supervisor_summary'"
+        ).fetchone()
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary["state"], TaskState.READY.value)
+        self.assertEqual(summary["parent_task_id"], "supervisor-task")
+        prompt = self.store.connection.execute(
+            "SELECT instruction_text FROM task_dispatch_specs WHERE task_id=?",
+            (summary["task_id"],),
+        ).fetchone()["instruction_text"]
+        self.assertIn("Worker 结果", prompt)
+        self.assertIn("worker-a", prompt)
 
     async def test_supervisor_cancel_does_not_spawn_children(self) -> None:
         self.store.create_task(
