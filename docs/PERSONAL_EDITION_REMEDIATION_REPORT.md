@@ -3,7 +3,7 @@
 ## R0：冻结基线与能力实测
 
 更新时间：2026-09-11
-状态：**R0、R1、R2、R3、R4、R5 已完成；R6 对话工作台切片和 R7 恢复/文档已完成；R8 已建立真实验收门禁并保持 `checkpoint`。**
+状态：**R0、R1、R2、R3、R4、R5、R6、R7、R8 已完成；R8 A–J 真实验收全部通过，个人版核心出口完成。**
 
 本报告是 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md` 的实施证据，不改写阶段 0–3 的历史签字。R0 只做基线、备份、能力实测和失败样本归档，没有重放或修改活动 Run，也没有把 SDK 的接口表面误写成编排器已经支持的行为。
 
@@ -255,7 +255,7 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 ## R6：项目—角色—Agent 对话工作台
 
 更新时间：2026-09-11
-状态：**R6 对话工作台切片已完成（本地 HTTP/SQLite/静态页证据通过）；真实后端活动插话、跨工作空间热切换和完整浏览器端到端验收仍未完成。**
+状态：**R6 对话工作台切片已完成（本地 HTTP/SQLite/静态页证据通过）；R8 后续已用真实 Codex 验证活动 `steer`，CodeBuddy 即时插话、跨工作空间热切换和完整浏览器端到端验收仍未完成。**
 
 ### 1. 已实现
 
@@ -279,12 +279,12 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 
 ### 3. R6 限制与未完成项
 
-项目选择当前保存的是受校验的元数据；正在运行的控制台不会在浏览器内热切换根目录，切换 workspace 仍需从目标目录重新启动控制台。游标接口返回事件增量，但当前页面为安全起见仍回放选中任务的持久上下文，不伪造流式工具轨迹。Codex 活动 `steer`、CodeBuddy 即时插话和取消确认仍以 R0/R5 能力表为准，尚无本轮真实后端证据；本切片只保证引导意图不丢失、目标 attempt 不错配。
+项目选择当前保存的是受校验的元数据；正在运行的控制台不会在浏览器内热切换根目录，切换 workspace 仍需从目标目录重新启动控制台。游标接口返回事件增量，但当前页面为安全起见仍回放选中任务的持久上下文，不伪造流式工具轨迹。R8 已用真实 Codex 证明活动 `steer` 可投递并生效；CodeBuddy 即时插话和跨 workspace 热切换仍是后续增强项。
 
 ## R7：恢复、迁移与个人版发布准备
 
 更新时间：2026-09-11
-状态：**R7 已完成（恢复检查、回收演练、历史清理预览和启动排障文档通过）；R8 真实后端端到端验收仍待执行。**
+状态：**R7 已完成（恢复检查、回收演练、历史清理预览和启动排障文档通过）；R8 真实后端端到端验收随后已完成。**
 
 ### 1. 已实现
 
@@ -307,22 +307,23 @@ Fake/本地 Git 已覆盖“候选 → 固定检查 → 证据绑定审核 → m
 
 ### 3. R7 限制
 
-恢复检查不会猜测后端进程是否已经停止；未确认的 CodeBuddy 取消仍由 R5 语义保留资源。历史预览没有自动归档或删除动作，避免误删个人项目的审计链和证据。R8 必须在可用账号环境中执行真实主管、双 Worker、独立审核、引导和重启场景。
+恢复检查不会猜测后端进程是否已经停止；未确认的 CodeBuddy 取消仍由 R5 语义保留资源。历史预览没有自动归档或删除动作，避免误删个人项目的审计链和证据。R8 已在可用账号环境中完成真实主管、双 Worker、独立审核、引导和重启场景。
 
 ## 5. 下一步
 
-R8 已建立固定的证据契约和只读验收门禁；下一步是在可用账号环境中固定样例项目并补齐 A--J 真实记录。Fake 或 API 单测不能替代真实端到端证据。
+R8 建立了固定的证据契约和只读验收门禁，并已在可用账号环境中固定样例项目完成 A--J 真实记录。Fake 或 API 单测不能替代真实端到端证据。
 
-## R8：真实端到端验收门禁（checkpoint）
+## R8：真实端到端验收门禁（完成）
 
-更新时间：2026-09-11
-状态：**checkpoint。A/B/D 已通过同一冻结样例的真实记录（A/D 各 3 次，B 共 7 次）；C/E/F/G/H/I/J 仍缺真实证据。**
+更新时间：2026-09-12
+状态：**完成。A–J 均已通过同一冻结样例的真实记录；A/D 各 3 次，B 共 7 次，C/E/F/G/H/I/J 各 1 次。**
 
 ### 1. 已实现
 
 - 新增 `scripts/personal_r8_acceptance.py`，冻结个人版样例标识 `personal-r8-fixed-sample-v1`、A--J 场景和最低重复次数；只读取证据，不启动模型、不修改 checkout、不执行删除或合并。
 - 新增 `scripts/personal_r8_real_evidence.py`，只读汇总真实 `demo --real` 报告，自动提取 B 的 Worker/session、并行重叠、隔离、集成和 checkout 指纹；只有报告明确记录主管最终汇总或独立 Reviewer session 时才会判定 A/D，并保留所有失败记录。
 - `orchestrator/poc/real_demo.py` 现在为每次真实样例启动独立 Reviewer thread，并让主管在集成后输出带两个 Worker 结果引用的结构化最终汇总；三次连续真实运行均通过 A/D 约束。
+- 新增 `scripts/personal_r8_remaining_real.py`，在隔离 `.agent-hub` worktree 中执行真实 C/E/F/G/H/I/J：依赖 commit 传递、越界计划零副作用拦截、Codex 重启/取消、运行中 steer、CodeBuddy 预算封顶、旧集成证据拒绝和同输入单 Agent 对照；`personal_r8_real_evidence.py` 只合并该报告中明确存在的场景。
 - 旧 `.agent-hub/reports/stage3-real.json` 只能作为历史 E2 参考。即使历史报告为 20/20，缺少主管汇总、独立审核/返工、重启/取消、运行中引导、预算和单 Agent 对照时仍输出 `CHECKPOINT`。
 - 证据报告自动移除可能的 API key、token、密码、cookie 等字段；R8 只有 A--J 全部 PASS、双真实后端和固定样例契约齐全时才输出 `COMPLETE`。
 
@@ -336,10 +337,17 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 | 真实双 Worker 并行与隔离 | PASS（B） | `.agent-hub/reports/personal-r8-evidence.json`：7 次成功真实记录，4 次失败记录保留；B 达到最低 3 次 |
 | 主管最终汇总 | PASS（A） | 3 次新真实记录含 `evidence.supervisor_summary.result_refs`，每次引用两个已接受 Worker 结果 |
 | 独立 Reviewer 返工 | PASS（D） | 3 次新真实记录含独立 Reviewer thread、缺陷发现、返工 attempt 和最终 PASS |
+| 依赖版本传递 | PASS（C） | 真实 CodeBuddy 上游写入/提交后，下游从上游 commit worktree 读取 `UPSTREAM_VERSION_V1` |
+| 非法计划与格式处理 | PASS（E） | 真实 Codex 输出越界 `../outside-r8.txt` 计划；验证器拒绝，checkout 零副作用，格式最多修复一次 |
+| 失败恢复与取消 | PASS（F） | 真实 Codex 生命周期：重启回收 1 个 starting call，取消终态 `interrupted`，重复派发/合并均为 0 |
+| 运行中用户引导 | PASS（G） | 真实 Codex `steer` 返回 acknowledged，最终 turn 应用了引导，checkout scope 未变化 |
+| 预算上限 | PASS（H） | 真实 CodeBuddy 调用结算后 `calls=1/max_calls=1`，第二个任务未派发，剩余量已记录 |
+| 审核和集成 | PASS（I） | 真实集成报告可见；篡改 accepted commit 的旧证据被转换器拒绝，集成检查全通过 |
+| 单 Agent 对照 | PASS（J） | 真实 CodeBuddy 以相同固定输入完成单 Agent 写任务，并保存实际 duration/usage 可得字段 |
 | 历史 20 场景报告 | 历史参考 | `.agent-hub/reports/stage3-real.json`：20/20，但不满足 R8 C--J 契约 |
-| R8 门禁回归 | PASS | `tests/test_personal_r8.py`：8 项通过 |
-| R8 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；349 项，348 通过、1 跳过 |
-| 当前 R8 总状态 | **CHECKPOINT** | `scripts/personal_r8_acceptance.py --evidence .agent-hub/reports/personal-r8-evidence.json`：A/B/D PASS，C/E/F/G/H/I/J PENDING |
+| R8 门禁回归 | PASS | `tests/test_personal_r8.py`：9 项通过 |
+| R8 全量回归 | PASS | `.venv\\Scripts\\python.exe -m unittest discover -s tests`；350 项，349 通过、1 跳过 |
+| 当前 R8 总状态 | **COMPLETE** | `scripts/personal_r8_acceptance.py --evidence .agent-hub/reports/personal-r8-evidence.json`：A–J 全部 PASS |
 
 ### 3. R8 门禁用法
 
@@ -361,4 +369,4 @@ R8 已建立固定的证据契约和只读验收门禁；下一步是在可用�
 
 ### 4. 未完成与下一步
 
-R8 仍缺真实依赖版本传递、格式错误/非法计划、重启/取消不重复副作用、运行中引导的实际生效时机、预算封顶、独立证据过期拒绝和单 Agent 对照（C/E/F/G/H/I/J）。下一步按固定样例逐项补齐这些证据；任何 FAIL 都保留 checkpoint，不得直接使用 `stage3: complete`。
+R8 A–J 真实出口已完成。后续只保留产品增强项（例如 CodeBuddy 活动 turn 的即时 steer、跨 workspace 热切换和更长时间稳定性），不得把这些可选增强倒写成当前 R8 的缺陷。

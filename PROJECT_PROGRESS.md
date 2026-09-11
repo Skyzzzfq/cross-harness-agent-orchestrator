@@ -1,19 +1,19 @@
 # 项目开发进度与阶段台账
 
-个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”、R1“角色/计划/批准”、R2“四区/任务尝试隔离”、R3“移交/结果回收/父任务聚合”、R4“独立验证/返工/Git 交付”、R5“消息/取消/预算”、R6“项目—角色—Agent 对话工作台”和 R7“恢复/迁移/个人版文档”已完成，R8 已建立真实验收门禁但仍为 checkpoint；证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`。历史 PASS 不等于个人版出口通过，本条不改变现有运行时完成状态。
+个人开发版整改计划（2026-09-11）：见 `docs/PERSONAL_EDITION_REMEDIATION_PLAN.md`。R0“冻结基线与能力实测”、R1“角色/计划/批准”、R2“四区/任务尝试隔离”、R3“移交/结果回收/父任务聚合”、R4“独立验证/返工/Git 交付”、R5“消息/取消/预算”、R6“项目—角色—Agent 对话工作台”、R7“恢复/迁移/个人版文档”和 R8“真实端到端验收”已完成；证据见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`。R8 已通过 A–J 真实出口，当前个人版可按文档自用。
 
 登录状态补充核验：同一项目 venv/SDK 在沙箱内无法读取 CodeBuddy 用户级认证目录，正常 Windows 用户权限下 marker=True、SDK=True。此前控制台继承沙箱限制会把“无权读取”误判成“未登录”；现已改为返回 `login_probe=unreadable` 和明确提示。已通过批准在正常权限启动 8091 控制台，真实 `/api/connections` 返回 CodeBuddy `logged_in=true`。另外，模型健康检查与真实任务都会直接发 CodeBuddy 请求：`.agent-hub/model-health.json` 最近一次记录 7 个内置模型成功，`test003` 已返回 CodeBuddy 文本并完成。因此“模型请求成功”是比认证文件探测更强的可用性证据。
 
-最新测试结果：349 项，348 通过、1 跳过（R8 门禁/真实证据转换回归及 R7/R6/R5 与既有测试）；以下旧切片测试数字为历史记录。
+最新测试结果：350 项，349 通过、1 跳过（R8 门禁/真实证据转换回归及 R7/R6/R5 与既有测试）；以下旧切片测试数字为历史记录。
 
 最新授权修复：CodeBuddy 网页入口改为内存中的 starting / waiting / completed / failed 状态；授权链接交给前端打开并提供可点击回退入口，终态清除链接，不写入日志。8090 实测接口进入 waiting；人工登录回调尚待验收。此前仅凭进程存活宣称授权页已打开的结论不成立。
 
 更新时间：2026-09-11
 GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 审计基线远端 main：87b875e；整改后当前远端 main 以 `git log` 为准
-当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；R6 对话工作台、R7 恢复/文档和 R8 验收门禁已分别提交，R8 的 A/B/D 已通过真实重复记录，C/E/F/G/H/I/J 仍待证据。**
+当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；R6 对话工作台、R7 恢复/文档和 R8 验收门禁已分别提交，R8 A–J 已通过真实记录，个人版验收完成。**
 
-对话工作台实现与限制见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`：项目→角色→Agent 树、独立上下文、事件 cursor、用户引导 durable 队列已接通；真实后端活动插话和跨 workspace 热切换仍不宣称已支持。
+对话工作台实现与限制见 `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`：项目→角色→Agent 树、独立上下文、事件 cursor、用户引导 durable 队列已接通；Codex 活动 `steer` 已由 R8 真实验证，CodeBuddy 即时插话和跨 workspace 热切换仍不宣称已支持。
 
 本文是当前状态的唯一入口。详细验收标准以《跨Harness多Agent团队编排系统实施计划.md》为准；阶段 2 的审计与对账记录见 STAGE2_AUDIT_FINDINGS.md、STAGE2_AUDIT_RESPONSE.md。
 
@@ -38,7 +38,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 | R5 消息与预算 | **完成** | `docs/PERSONAL_EDITION_REMEDIATION_REPORT.md`；schema v20 durable delivery/取消确认/进度心跳/预算 reservation；全量 331/330/1 | 真实后端即时引导与取消确认未验证；进入 R6 |
 | R6 对话工作台 | **checkpoint（切片完成）** | `stage3: checkpoint project agent conversation workspace`；项目 API、角色/Agent 树、cursor/events、引导队列；全量 335/334/1 | 真实活动插话、跨 workspace 热切换和完整浏览器端到端未验证；进入 R7 |
 | R7 恢复与文档 | **完成** | `stage3: checkpoint recovery and personal edition documentation`；recovery-check、history-preview、reconcile 恢复演练、启动/端口/备份文档；全量 340/339/1 | 不自动删除历史；后端停止确认与 R8 真实场景仍未验证 |
-| R8 真实验收 | **checkpoint（A/B/D 已通过）** | `scripts/personal_r8_acceptance.py`、`scripts/personal_r8_real_evidence.py`；A/D 各 3 次、B 共 7 次真实记录 | C/E/F/G/H/I/J 仍 PENDING；CodeBuddy 已 `auth=verified`，需继续固定样例补证 |
+| R8 真实验收 | **完成（A–J PASS）** | `scripts/personal_r8_acceptance.py` 输出 `COMPLETE`；A/D 各 3 次、B 7 次、C/E/F/G/H/I/J 各 1 次真实记录；全量 350/349/1 | 个人版核心出口已完成；E8 干净 Windows 演示仍按用户决策跳过 |
 
 阶段 2 曾在 d2519fe 被标记 complete，但只读审计发现退出条件未被端到端实现，WorkBuddy 确认 3 项 P0、6 项 P1 和 4 项文档问题成立后原签字撤销。随后按审计顺序完成全部 **P0（P0-01/02/03）与 MVP 必需 P1（P1-01/04/05）** 的修复并重新验收；【Beta 再补】项（P1-02/03/06）按产品口径转入阶段 3 处理，不阻塞本阶段签字。
 

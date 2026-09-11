@@ -11,7 +11,7 @@ from scripts.personal_r8_acceptance import (
     evaluate_evidence,
 )
 from orchestrator.poc.real_demo import _redact_credentials
-from scripts.personal_r8_real_evidence import build_evidence
+from scripts.personal_r8_real_evidence import _merge_remaining, build_evidence
 
 
 def complete_evidence() -> dict:
@@ -295,6 +295,32 @@ class PersonalR8AcceptanceTests(unittest.TestCase):
         gate = evaluate_evidence(evidence)
         self.assertEqual(gate["status"], "CHECKPOINT")
         self.assertEqual(gate["scenarios"]["D"]["status"], "PENDING")
+
+    def test_remaining_real_slices_are_merged_without_inference(self) -> None:
+        base = {"scenarios": {"A": {"repetitions": 0}}, "notes": []}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "remaining.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "scenarios": {
+                            "C": {
+                                "repetitions": 1,
+                                "dependency_base_commits": ["upstream"],
+                                "verified_upstream_refs": ["artifact://upstream"],
+                                "evidence_refs": ["evidence://c"],
+                            },
+                            "E": {"repetitions": 0},
+                            "X": {"repetitions": 99},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            merged = _merge_remaining(base, path)
+        self.assertIn("C", merged["scenarios"])
+        self.assertIn("E", merged["scenarios"])
+        self.assertNotIn("X", merged["scenarios"])
 
 
 if __name__ == "__main__":

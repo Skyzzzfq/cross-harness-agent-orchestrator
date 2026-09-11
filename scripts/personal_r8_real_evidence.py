@@ -1,4 +1,4 @@
-"""从已完成的真实 ``demo --real`` 报告生成 R8 A/B/D 证据。
+"""从真实报告生成 R8 A--J 证据，不推断缺失场景。
 
 该转换器只读取 ``.agent-hub/reports/run-real-*.json``，不会重新调用模型、
 修改数据库或 checkout。它只把统一的真实 PoC 报告映射到
@@ -6,7 +6,8 @@
 
 * A：Codex 主管计划、两个 CodeBuddy Worker 调用和不同 session；
 * B：两个 worktree/commit 的并行和用户 checkout 指纹；
-* D：独立 Codex 审核发现缺陷、返工 session 和最终验证。
+* D：独立 Codex 审核发现缺陷、返工 session 和最终验证；
+* C/E/F/G/H/I/J：只合并 ``personal_r8_remaining_real.py`` 产生的结构化记录。
 
 其余 R8 场景不会被推断为通过，需由固定样例的专门记录补充。
 
@@ -68,6 +69,31 @@ def _read(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _merge_remaining(report: dict[str, Any], path: Path | None) -> dict[str, Any]:
+    """Merge separately collected real C--J slices without inferring missing data."""
+    if path is None:
+        return report
+    remaining = _read(path)
+    if not remaining:
+        return report
+    scenarios = remaining.get("scenarios")
+    if not isinstance(scenarios, dict):
+        return report
+    report["scenarios"].update(
+        {
+            str(key): value
+            for key, value in scenarios.items()
+            if str(key) in {"C", "E", "F", "G", "H", "I", "J"}
+            and isinstance(value, dict)
+        }
+    )
+    report["remaining_source"] = _relative_ref(path)
+    report.setdefault("notes", []).append(
+        "C/E/F/G/H/I/J are copied only from the separately recorded remaining real-slice report."
+    )
+    return report
 
 
 def _relative_ref(path: Path) -> str:
@@ -307,7 +333,7 @@ def build_evidence(paths: Iterable[Path], *, root: Path = ROOT) -> dict[str, Any
             "A additionally requires a recorded supervisor_summary referencing both worker results.",
             "D additionally requires an independent reviewer session distinct from the supervisor thread.",
             "failure_records retains every scanned report that did not meet the full frozen checks.",
-            "C/E/F/G/H/I/J intentionally omitted; the R8 gate must keep them pending.",
+            "C/E/F/G/H/I/J are pending unless a separate structured real-slice report is merged.",
         ],
     }
 
@@ -321,10 +347,18 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=ROOT / ".agent-hub" / "reports" / "personal-r8-evidence.json",
     )
+    parser.add_argument(
+        "--remaining",
+        type=Path,
+        default=ROOT / ".agent-hub" / "reports" / "personal-r8-remaining.json",
+        help="optional credential-free real C--J slice report",
+    )
     args = parser.parse_args(argv)
     root = args.root.resolve()
     paths = _load_paths(root, args.reports)
     report = build_evidence(paths, root=root)
+    remaining = args.remaining if args.remaining.is_absolute() else root / args.remaining
+    report = _merge_remaining(report, remaining if remaining.is_file() else None)
     output = args.output if args.output.is_absolute() else root / args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

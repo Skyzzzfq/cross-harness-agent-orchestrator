@@ -1,6 +1,6 @@
 # 个人开发版多 Agent 协作整改计划
 
-编制日期：2026-09-11。状态：R0、R1、R2、R3、R4、R5 已验收；R6 对话工作台切片和 R7 恢复/文档已完成并保持 `stage3: checkpoint`；R8 验收门禁已建立，A/B/D 已有真实通过记录，C/E/F/G/H/I/J 仍待实施。
+编制日期：2026-09-11。状态：R0、R1、R2、R3、R4、R5 已验收；R6 对话工作台切片和 R7 恢复/文档已完成；R8 A–J 真实验收已完成，个人版核心出口通过。阶段 3 的 E8 干净 Windows 演示仍按用户决策跳过。
 
 目标：用户向主管提交一次任务，由主管规划、两个 Worker 按需并行、独立 Reviewer 根据真实证据审核，系统完成有限返工、集成与交付；用户可以查看每个 Agent 的对话并给出引导。
 
@@ -311,7 +311,7 @@ A、B、D 至少各重复 3 次；每次记录失败，不只挑成功截图。�
 | R5 消息与预算 | **完成** | 本轮 R5 提交（见 `git log`） | schema v20；durable deliveries；取消确认与资源保留；进度心跳和预算 reservation；全量 331/330/1；真实后端即时引导/取消确认未验证 | 依赖 R4 |
 | R6 对话工作台 | **checkpoint（切片完成）** | 本轮 `stage3: checkpoint project agent conversation workspace` | 项目元数据 API；项目→角色→Agent 导航；chat cursor/events 与 Agent 过滤；运行中引导 durable 入队；全量 335/334/1 | 真实活动插话、跨 workspace 热切换和完整浏览器端到端仍待 R7/R8 处理 |
 | R7 恢复与文档 | **完成** | 本轮 `stage3: checkpoint recovery and personal edition documentation` | recovery-check 只读检查；reconcile 一次性回收；history-preview 清理候选；备份/恢复/端口/排障文档；R7 专项 5 项通过 | 不确认后端是否真正停止；不自动删除历史，R8 仍需真实验收 |
-| R8 真实验收 | **checkpoint（A/B/D 已通过）** | `scripts/personal_r8_acceptance.py`、`scripts/personal_r8_real_evidence.py`；A/D 各 3 次、B 共 7 次真实记录；全量 349/348/1 | C/E/F/G/H/I/J 真实证据仍待执行；不能使用 `stage3: complete` |
+| R8 真实验收 | **完成（A–J PASS）** | `scripts/personal_r8_acceptance.py` 输出 `COMPLETE`；A/D 各 3 次、B 7 次、C/E/F/G/H/I/J 各 1 次真实记录；全量 350/349/1 | 个人版核心出口已完成；E8 干净 Windows 演示按用户决策跳过 |
 
 建议每个切片内按“契约/测试 → 最小实现 → 回归 → 真实证据（适用时）→ 文档 → commit”完成。一个切片过大时追加 Rn-a/Rn-b，不跳过出口。按用户既有要求在已完成切片后提交并推送当前项目仓库；提交前核查实际 diff，仅包含该切片相关修改，禁止把凭据、运行数据、下载缓存或其他未归属改动一起上传。
 
