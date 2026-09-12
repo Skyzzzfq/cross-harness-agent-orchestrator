@@ -8,7 +8,7 @@
 
 最新授权修复：CodeBuddy 网页入口改为内存中的 starting / waiting / completed / failed 状态；授权链接交给前端打开并提供可点击回退入口，终态清除链接，不写入日志。8090 实测接口进入 waiting；人工登录回调尚待验收。此前仅凭进程存活宣称授权页已打开的结论不成立。
 
-更新时间：2026-09-11
+更新时间：2026-09-12
 GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 审计基线远端 main：87b875e；整改后当前远端 main 以 `git log` 为准
 当前结论：**阶段 0、阶段 1、阶段 2（重新签字）全部 PASS；阶段 3 Beta 已签字（tag `stage3-beta-complete`，提交 19b4daa），退出条件 6/7 PASS + E8 显式跳过（开发自用）；R6 对话工作台、R7 恢复/文档和 R8 验收门禁已分别提交，R8 A–J 已通过真实记录，个人版验收完成。**
@@ -56,6 +56,7 @@ GitHub：Skyzzzfq/cross-harness-agent-orchestrator
 - Run 启动服务时按 Run 保存的 team_id 自动解析 .agent-hub/teams/<team_id>.json 或默认团队文件，不再弹出并默认使用 config/team.yaml；旧的 default Run 仍兼容回退到默认团队。
 - 控制台团队优先任务入口已补齐：新建 Run 默认使用“自动协作”，发起任务默认把自然语言交给 Run 绑定的 Supervisor，后端/提供方/模型只作为高级临时覆盖；主管计划失败兼容模型常见的 `supervisor_response`/`instruction` 别名，并在全部 Worker 完成后自动创建自然语言汇总任务。
 - Run 列表支持受保护的删除和详情收起：删除前要求停止 serve，只清理该 Run 的受管 worktree/运行目录并保留审计事件；列表轮询采用 keyed DOM 更新，不再整块重建导致详情闪烁。
+- Run 列表现在按创建时间倒序显示，新建 Run 位于列表顶部；详情展开不再调用 `scrollIntoView`，避免点击详情跳回列表顶部；页面横向裁剪改用 `overflow-x: clip`，保留全局 sticky 顶栏在长列表滚动时可见。
 - Agent 对话现在隐藏内部计划 JSON，按项目→角色→Agent 显示全部绑定实例（包括尚未执行的 CodeBuddy Worker），并为每个 Agent 保留任务过滤上下文。
 - 控制台审核/对话切片已接通：serve 持有 `serve-*` controller 时，人工审核和删除复用当前 controller/authority fencing token，不再因“run controller is held by another owner”失败；暂停/恢复/取消仍保持单写者保护。
 - 任务列表补充任务说明、尝试次数、独立“对话/删除”按钮；删除只允许非运行任务，删除前清理 FK 子记录并保留 `task.deleted` 审计事件。
@@ -217,3 +218,4 @@ SPIKE_REPORT.md 和 STAGE1_REPORT.md 为只读历史签字。旧的 Stage 2 comp
 - （2026-09-10）控制台写任务闭环 UI 提交：write_scope 表单、worktree 自动准备、REVIEW 通过/打回按钮 + 进度台账数据校准（261 测试、schema v13）。
 - （2026-09-11）修复 CodeBuddy 一键登录运行时：启动器优先复用项目 `.venv`，后台授权即使控制台由备用 Python 启动也切换到项目 `.venv`；新增回归测试验证 SDK 运行时选择和子进程秒退提示；控制台不再要求输入 `/login`；补齐 serve 子进程源码路径传递；全量 301/301 通过。
 - （2026-09-12）完成团队优先任务入口（新 Run 默认自动协作）、主管自动汇总、Run 删除/收起与详情防闪、自然语言 Agent 对话和完整 Agent 树，并兼容 `supervisor_response`/`instruction` 计划字段；全量 357 项（356 通过、1 跳过）。
+- （2026-09-12）修复主管计划提示契约：明确顶层 `summary`、完整任务字段和“不要把主管汇总建成 Worker 任务”；Run 列表改为新建优先、详情展开保留滚动位置。清理明确命名的旧测试 Run `test001`–`test004`（保留 `test005` 供诊断）；全量 357 项（356 通过、1 跳过）。

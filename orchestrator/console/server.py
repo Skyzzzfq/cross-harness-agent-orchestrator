@@ -510,7 +510,7 @@ class ConsoleHandler(BaseHTTPRequestHandler):
         rows = store.connection.execute(
             "SELECT r.run_id, r.team_id, r.control_state, r.created_at FROM runs r "
             "LEFT JOIN deleted_runs d ON d.run_id=r.run_id "
-            "WHERE d.run_id IS NULL ORDER BY r.created_at, r.run_id"
+            "WHERE d.run_id IS NULL ORDER BY r.created_at DESC, r.run_id DESC"
         ).fetchall()
         runs: list[dict[str, Any]] = []
         for row in rows:

@@ -98,3 +98,10 @@
 
 因此本报告只支持 `stage3: checkpoint supervisor entry`，不支持新的 `stage3: complete` 结论。
 本轮补充验证：tests.test_stage3_console 42 项通过；全量 unittest discover 311 项，310 通过、1 跳过；新增 Run 团队绑定回归确认省略 team_path 时使用 Run 对应的已保存团队，并自动迁移旧 default 别名。
+
+## 本轮补充：Run 列表与真实主管计划诊断（2026-09-12）
+
+- Run API 改为按创建时间倒序返回，新建 Run 位于列表顶部；前端详情展开移除 `scrollIntoView`，避免点击详情改变用户当前浏览位置；全局顶栏继续使用 sticky，并改用 `overflow-x: clip` 避免长列表滚动时被隐式滚动容器吞掉。
+- 通过控制台删除明确命名的旧测试 Run `test001`、`test002`、`test003`、`test004`，仅清理受管 worktree/运行目录并保留 `run.deleted` 审计记录；`test005` 未删除。
+- `test005` 的两次 Codex supervisor call 均返回了 `tasks` 但缺少顶层 `summary`，第一次还把 `supervisor_summary` 错误地放进 Worker 任务列表；严格校验因此产生两次 `plan.rejected`，随后 `plan.needs_input`，没有任何 Worker 被物化。主管提示模板已补齐顶层 `summary` 和全部必需任务字段，并明确由 Hub 在 Worker 完成后创建自然语言汇总任务。
+- 专项回归与前端语法检查通过；全量 `unittest discover`：357 项，356 通过、1 跳过。

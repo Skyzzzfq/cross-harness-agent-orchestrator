@@ -111,6 +111,9 @@ class ConsoleServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, created)
         self.assertEqual(created["run_id"], "run-2")
+        status, listed = _request(self.port, "/api/runs")
+        self.assertEqual(status, 200)
+        self.assertEqual(listed["runs"][0]["run_id"], "run-2")
         # 重复创建冲突
         status, payload = _request(
             self.port, "/api/runs", method="POST", body={"run_id": "run-1"}

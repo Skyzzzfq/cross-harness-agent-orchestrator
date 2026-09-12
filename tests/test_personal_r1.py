@@ -67,7 +67,10 @@ class R1ContractTests(unittest.TestCase):
         prompt = build_role_prompt(role, task_package={"goal": "x"})
         self.assertIn("ROLE: Supervisor", prompt)
         self.assertIn("APPROVED TASK PACKAGE", prompt)
-        self.assertIn("LEGAL PLAN SHAPE", build_supervisor_plan_prompt(_team(), user_goal="x"))
+        prompt = build_supervisor_plan_prompt(_team(), user_goal="x")
+        self.assertIn("LEGAL PLAN SHAPE", prompt)
+        self.assertIn('"summary"', prompt)
+        self.assertIn("REQUIRED TASK FIELDS", prompt)
 
     def test_two_slots_allow_six_sequential_tasks(self) -> None:
         plan = validate_supervisor_plan(

@@ -20,12 +20,12 @@ html,body{height:100%}
 body{
   font-family:-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   background:radial-gradient(1200px 600px at 80% -10%,#16233f 0%,transparent 60%),var(--bg);
-  color:var(--text);font-size:14px;line-height:1.6;overflow-x:hidden;
+  color:var(--text);font-size:14px;line-height:1.6;overflow-x:clip;
 }
 /* ---------- 顶栏 ---------- */
 header{
   position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:20px;
-  padding:0 22px;min-height:56px;height:auto;background:rgba(11,18,32,.82);backdrop-filter:blur(10px);
+  align-self:flex-start;padding:0 22px;min-height:56px;height:auto;background:rgba(11,18,32,.92);backdrop-filter:blur(10px);
   border-bottom:1px solid var(--line);
 }
 .logo{display:flex;align-items:center;gap:9px;flex:0 1 auto;min-width:0;font-weight:700;font-size:15px;letter-spacing:.2px;white-space:nowrap}
@@ -600,7 +600,7 @@ async function stopServe(runId){
   await api(`/api/runs/${runId}/serve/stop`,{method:"POST",body:"{}"});
   toast(runId+" serve 已停止");loadRuns();}
 
-async function openRun(runId,cardEl,scroll=true){
+async function openRun(runId,cardEl){
   if(expandedRun===runId){
     const current=cardEl?.querySelector(".run-detail[data-detail]");
     if(current)current.style.display="none";
@@ -610,7 +610,9 @@ async function openRun(runId,cardEl,scroll=true){
   expandedRun=runId;
   if(cardEl)$$(".run-detail").forEach(d=>d.style.display="none");
   const detail=cardEl?cardEl.querySelector(".run-detail"):null;
-  if(detail){detail.style.display="block";if(scroll)detail.scrollIntoView({behavior:"smooth",block:"nearest"});}
+  // Expand in place.  Scrolling the detail node into view moves the page away
+  // from the user's list position (and is especially disruptive during polling).
+  if(detail)detail.style.display="block";
   syncRunDetailButtons();
   await Promise.all([loadSummary(runId),loadDetail(runId)]);
 }

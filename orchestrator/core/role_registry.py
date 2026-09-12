@@ -213,14 +213,36 @@ def build_supervisor_plan_prompt(team_spec: Any, *, user_goal: str, budget: Mapp
     contract = {
         "plan_version": 2,
         "revision": 1,
+        "summary": "string: explain the supervisor's plan at the top level; never put this in tasks",
         "worker_concurrency": "integer <= available worker slots",
         "task_cap": "integer <= budget and may exceed worker_concurrency for sequential work",
-        "tasks": "each task includes acceptance_criteria, input_refs, task_kind, output_contract",
+        "tasks": (
+            "array; each task includes task_id, role_id, backend, prompt, "
+            "access_mode, write_scope, depends_on, acceptance_criteria, input_refs, "
+            "task_kind, output_contract"
+        ),
+    }
+    required_task_fields = {
+        "task_id": "unique string",
+        "role_id": "role from ROLE/POOL DIRECTORY",
+        "backend": "backend from ROLE/POOL DIRECTORY",
+        "prompt": "natural-language instruction (instruction is not accepted in the canonical shape)",
+        "access_mode": "read_only or write",
+        "write_scope": "array of relative paths; [] for read_only",
+        "depends_on": "array of task_id values",
+        "acceptance_criteria": "array of strings",
+        "input_refs": "array of refs or task_id values",
+        "task_kind": "short string",
+        "output_contract": "object",
     }
     return "\n\n".join((
-        "You are the supervisor. Return JSON only; the Hub validates it before execution.",
+        "You are the supervisor. Return JSON only; the Hub validates it before execution. "
+        "The top-level summary is mandatory and must be a string. Do not create a task "
+        "for the supervisor's own summary; the Hub creates the final natural-language "
+        "summary after Worker results arrive.",
         f"USER GOAL:\n{user_goal.strip()}",
         "ROLE/POOL DIRECTORY:\n" + json.dumps(directory, ensure_ascii=False, sort_keys=True),
         "BUDGET:\n" + json.dumps(dict(budget or {}), ensure_ascii=False, sort_keys=True),
         "LEGAL PLAN SHAPE:\n" + json.dumps(contract, ensure_ascii=False, sort_keys=True),
+        "REQUIRED TASK FIELDS:\n" + json.dumps(required_task_fields, ensure_ascii=False, sort_keys=True),
     ))
