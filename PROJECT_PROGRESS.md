@@ -219,3 +219,4 @@ SPIKE_REPORT.md 和 STAGE1_REPORT.md 为只读历史签字。旧的 Stage 2 comp
 - （2026-09-11）修复 CodeBuddy 一键登录运行时：启动器优先复用项目 `.venv`，后台授权即使控制台由备用 Python 启动也切换到项目 `.venv`；新增回归测试验证 SDK 运行时选择和子进程秒退提示；控制台不再要求输入 `/login`；补齐 serve 子进程源码路径传递；全量 301/301 通过。
 - （2026-09-12）完成团队优先任务入口（新 Run 默认自动协作）、主管自动汇总、Run 删除/收起与详情防闪、自然语言 Agent 对话和完整 Agent 树，并兼容 `supervisor_response`/`instruction` 计划字段；全量 357 项（356 通过、1 跳过）。
 - （2026-09-12）修复主管计划提示契约：明确顶层 `summary`、完整任务字段和“不要把主管汇总建成 Worker 任务”；Run 列表改为新建优先、详情展开保留滚动位置。清理明确命名的旧测试 Run `test001`–`test004`（保留 `test005` 供诊断）；全量 357 项（356 通过、1 跳过）。
+- （2026-09-14）核验 `test005` 真实历史：两轮均已走通 Supervisor 规划、双 CodeBuddy Worker 和 Codex 汇总，共 8 条任务停在 REVIEW。修复真实团队 Run 的只读审核误要求 `candidate_commit`/验证证据、导致网页「通过」必然失败的问题；写任务的证据门禁保持不变。Run 创建时间、事件时间线和 Agent 对话时间统一按 `Asia/Shanghai` 显示并明确标注北京时间；全量 359 项（358 通过、1 跳过）。

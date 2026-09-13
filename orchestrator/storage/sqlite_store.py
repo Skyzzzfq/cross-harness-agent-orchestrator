@@ -4082,9 +4082,22 @@ class SQLiteStateStore:
             snapshot = self.connection.execute(
                 "SELECT team_snapshot_json FROM runs WHERE run_id = ?", (run_id,)
             ).fetchone()
-            if snapshot is not None and snapshot["team_snapshot_json"] and decision in {
-                "PASS", "APPROVED"
-            }:
+            task = self.connection.execute(
+                "SELECT access_mode FROM tasks WHERE task_id = ? AND run_id = ?",
+                (task_id, run_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            # A persisted team snapshot enables the strict, evidence-bound review
+            # gate for write work.  Read-only conversations have no candidate
+            # commit by design, so requiring Git evidence makes their Review
+            # button impossible to use.
+            if (
+                snapshot is not None
+                and snapshot["team_snapshot_json"]
+                and str(task["access_mode"]) != "read_only"
+                and decision in {"PASS", "APPROVED"}
+            ):
                 if not attempt_id:
                     raise ValueError("approved review requires an attempt_id")
                 candidate_commit = str(detail.get("candidate_commit") or "").strip()

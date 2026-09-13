@@ -122,6 +122,25 @@ class R4VerificationTests(unittest.TestCase):
                 str(self.base), controller, authority=authority, reason="forged",
             )
 
+    def test_read_only_review_with_team_snapshot_needs_no_git_evidence(self) -> None:
+        """A real team Run must still allow approval of conversation-only work."""
+        self.store.create_task(
+            "run-r4", "task-read", access_mode="read_only",
+            required_role_id="worker", cwd=str(self.root), prompt="introduce yourself",
+        )
+        self.store.transition_task("task-read", TaskState.READY, reason="test")
+        self.store.create_attempt("task-read", "attempt-read", "agent-read")
+        self.store.transition_task("task-read", TaskState.REVIEW, reason="result-ready")
+        _, authority = self._tokens()
+
+        decision_id = self.store.record_review_decision(
+            "run-r4", "task-read", attempt_id="attempt-read",
+            layer="human", decision="APPROVED", decided_by="r4-test",
+            detail={"comment": "looks good"}, authority=authority,
+        )
+
+        self.assertTrue(decision_id.startswith("review-"))
+
     def test_rework_is_bounded_to_two_rounds(self) -> None:
         store = SQLiteStateStore(Path(self.temp.name) / "legacy.db")
         try:

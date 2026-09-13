@@ -382,3 +382,14 @@ R8 A–J 真实出口已完成。后续只保留产品增强项（例如 CodeBud
 - `test004` 原失败原因已记录并修复：模型把计划摘要返回为 `supervisor_response`、把 Worker 指令返回为 `instruction`，而严格契约使用 `summary`/`prompt`；入口只做这两个无损别名规范化，随后仍执行相同的字段、角色、后端、scope 校验。
 
 验证：`.venv\\Scripts\\python.exe -m unittest discover -s tests`，357 项，356 通过、1 跳过；静态页 Node 语法检查通过，`git diff --check` 通过。
+
+## 产品增强：真实运行审核与北京时间修复（2026-09-14）
+
+状态：**已完成（根据 `test005` 首次控制台真实协作记录修复）。**
+
+- 历史核验确认 `test005` 的 Supervisor 规划、两个 CodeBuddy Worker 执行和 Codex 最终汇总均已真实成功；旧任务返工与新任务同时恢复，形成两轮完整协作、共 8 条 REVIEW 任务。
+- 「通过」失败的根因是 R4 证据门禁仅判断 Run 是否保存团队快照，错误地要求只读对话任务提交 `candidate_commit` 和 Git 验证证据。现在只有写任务需要这些证据；只读任务可记录 human APPROVED 并进入 COMPLETED，写任务安全门禁不放宽。
+- 控制台不再直接截取数据库 UTC 字符串；Run 创建时间、事件时间线和 Agent 对话时间均通过 `Asia/Shanghai` 转换，并在界面明确标注「北京时间」。
+- 后续可选优化：相似主管任务提交前提示重复，避免返工中的旧任务和新建任务同时执行；这不阻塞当前三 Agent 协作闭环。
+
+验证：`.venv\\Scripts\\python.exe -m unittest discover -s tests`，359 项，358 通过、1 跳过；`git diff --check` 通过。

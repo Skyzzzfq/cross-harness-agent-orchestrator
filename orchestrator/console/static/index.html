@@ -395,6 +395,15 @@ let MODEL_PROVIDERS=[];
 const CODEBUDDY_PROBE_CACHE={};
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const mono=v=>`<span class="mono">${esc(v)}</span>`;
+const beijingFormatter=new Intl.DateTimeFormat("zh-CN",{
+  timeZone:"Asia/Shanghai",year:"numeric",month:"2-digit",day:"2-digit",
+  hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false
+});
+function beijingTime(value){
+  if(!value)return "—";
+  const date=new Date(value);if(Number.isNaN(date.getTime()))return String(value);
+  return beijingFormatter.format(date).replaceAll("/","-");
+}
 
 async function api(path,opt){try{const r=await fetch(path,opt);const d=await r.json().catch(()=>({}));return{status:r.status,body:d};}catch(e){return{status:0,body:{error:String(e)}};}}
 function toast(msg,kind="info"){const t=document.createElement("div");t.className="toast "+kind;t.textContent=msg;
@@ -545,7 +554,7 @@ async function loadRuns(){
     head.innerHTML=`
       <span class="run-id">${mono(runId)}</span>
       ${run.running?'<span class="pill ok pulse">serve 运行中</span>':'<span class="pill gray">serve 未启动</span>'}
-      <span class="run-meta">团队：${esc(run.team_id)} · 创建 ${esc((run.created_at||"").slice(0,19).replace("T"," "))} · 任务 ${doneN}/${totalN}</span>
+      <span class="run-meta">团队：${esc(run.team_id)} · 创建 ${esc(beijingTime(run.created_at))}（北京时间） · 任务 ${doneN}/${totalN}</span>
       <span class="run-actions">
         ${run.running
           ?`<button class="btn danger sm" data-stop="${esc(runId)}">停止 serve</button>`
@@ -678,9 +687,9 @@ async function loadDetail(runId){
           <td class="mono">${esc((m.result_commit||"").slice(0,10))}</td><td>${pill(m.status)}</td></tr>`).join("")}
         </tbody></table></div>`:'<div class="empty">合并队列为空</div>'}
     </div>
-    <div class="detail-section"><h4>事件时间线（最近 40）</h4>
+    <div class="detail-section"><h4>事件时间线（北京时间，最近 40）</h4>
       ${(events.body.events||[]).slice(-40).reverse().map(ev=>`
-        <div class="ev-row"><span class="t">${esc((ev.created_at||"").slice(11,19))}</span>
+        <div class="ev-row"><span class="t">${esc(beijingTime(ev.created_at))}</span>
         <span class="k">${esc(ev.kind)}</span><span>${esc((ev.task_id||"")+" ")}${esc(String(ev.payload_json||"").slice(0,80))}</span></div>`).join("")||'<div class="empty">暂无事件</div>'}
     </div>`;
   box.querySelector('[data-action="new"]').onclick=()=>newTaskForm(runId);
@@ -704,7 +713,7 @@ async function loadDetail(runId){
   box.querySelectorAll("[data-chat-task]").forEach(b=>b.onclick=()=>openChat(runId,b.dataset.chatTask));
   box.querySelectorAll("[data-review]").forEach(b=>b.onclick=async()=>{
     const dec=b.dataset.dec;
-    if(dec==="approve"&&!confirm("通过后写任务产出将真实合并进主仓库，且不可撤销。继续？"))return;
+    if(dec==="approve"&&!confirm("确认通过这条任务结果？写任务会真实合并进主仓库，纯对话任务只会标记为已完成。"))return;
     if(dec==="rework"&&!confirm("打回后任务将回到 READY 重新派发。继续？"))return;
     const r=await api(`/api/runs/${runId}/tasks/${b.dataset.review}/review`,
       {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision:dec,comment:"console"})});
@@ -840,7 +849,7 @@ async function loadChat(runId,taskId=""){
   const agentNames=[...new Set(agentMessages.map(x=>[x.agent_id,x.backend,x.model].filter(Boolean).join(" · ")))].filter(Boolean);
   $("#chatAgentMeta").textContent=agentNames.length?agentNames.join(" / "):"尚未绑定 Agent";
   $("#chatStatus").textContent=`${tasks.length} 个任务 · 游标 ${chatCursor||0} · 每 2.5 秒自动刷新`;
-  $("#chatStream").innerHTML=(task.messages||[]).map(m=>`<article class="chat-msg ${esc(m.role||"system")}"><div class="chat-msg-meta"><span>${m.role==="agent"?"Agent":m.role==="user"?"任务":"系统"}</span>${m.agent_id?`<span>${esc(m.agent_id)}</span>`:""}${m.backend?`<span>${esc(m.backend)}${m.model?` · ${esc(m.model)}`:""}</span>`:""}<span>${esc((m.state||"").toUpperCase())}</span><span>${esc((m.created_at||"").slice(0,19).replace("T"," "))}</span></div><div>${esc(m.text||"")}</div></article>`).join("");
+  $("#chatStream").innerHTML=(task.messages||[]).map(m=>`<article class="chat-msg ${esc(m.role||"system")}"><div class="chat-msg-meta"><span>${m.role==="agent"?"Agent":m.role==="user"?"任务":"系统"}</span>${m.agent_id?`<span>${esc(m.agent_id)}</span>`:""}${m.backend?`<span>${esc(m.backend)}${m.model?` · ${esc(m.model)}`:""}</span>`:""}<span>${esc((m.state||"").toUpperCase())}</span><span>${esc(beijingTime(m.created_at))}（北京时间）</span></div><div>${esc(m.text||"")}</div></article>`).join("");
 }
 function renderChatTree(chat,runId,taskId){
   const box=$("#chatProjectTree"),project=chat.project||{},roles=chat.roles||[];

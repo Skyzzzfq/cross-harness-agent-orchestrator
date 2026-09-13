@@ -821,6 +821,12 @@ class ConsoleBusyTests(unittest.TestCase):
         self.store.transition_task("task-review", TaskState.READY, reason="test")
         self.store.create_attempt("task-review", "attempt-review", "agent-review")
         self.store.transition_task("task-review", TaskState.REVIEW, reason="test")
+        # Real Runs persist a team snapshot.  Read-only approval must not be
+        # mistaken for a write review that requires commit/evidence fields.
+        with self.store.connection:
+            self.store.connection.execute(
+                "UPDATE runs SET team_snapshot_json='{}' WHERE run_id='run-1'"
+            )
         status, payload = _request(
             self.port,
             "/api/runs/run-1/tasks/task-review/review",
@@ -829,6 +835,15 @@ class ConsoleBusyTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, payload)
         self.assertEqual(self.store.task_state("task-review"), TaskState.COMPLETED)
+
+    def test_console_renders_all_timestamps_as_beijing_time(self) -> None:
+        html = (Path(__file__).parents[1] / "orchestrator" / "console" / "static" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('timeZone:"Asia/Shanghai"', html)
+        self.assertIn("事件时间线（北京时间，最近 40）", html)
+        self.assertIn("beijingTime(ev.created_at)", html)
+        self.assertIn("beijingTime(m.created_at)", html)
 
 
 class FindFreePortTests(unittest.TestCase):
